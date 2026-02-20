@@ -329,6 +329,7 @@ BEGIN
         ScheduleId int NOT NULL,
         Name nvarchar(50) NOT NULL,
         StartDate date NOT NULL CONSTRAINT DF_EmployeeTypes_StartDate DEFAULT CAST(SYSUTCDATETIME() AS date),
+        EndDate date NULL,
         DisplayOrder int NOT NULL CONSTRAINT DF_EmployeeTypes_DisplayOrder DEFAULT 0,
         PatternId int NULL,
         IsActive bit NOT NULL CONSTRAINT DF_EmployeeTypes_IsActive DEFAULT 1,
@@ -339,7 +340,8 @@ BEGIN
         DeletedAt datetime2 NULL,
         DeletedBy nvarchar(64) NULL,
         CONSTRAINT FK_EmployeeTypes_Schedules FOREIGN KEY (ScheduleId) REFERENCES dbo.Schedules(ScheduleId),
-        CONSTRAINT FK_EmployeeTypes_Patterns FOREIGN KEY (PatternId) REFERENCES dbo.Patterns(PatternId)
+        CONSTRAINT FK_EmployeeTypes_Patterns FOREIGN KEY (PatternId) REFERENCES dbo.Patterns(PatternId),
+        CONSTRAINT CK_EmployeeTypes_DateRange CHECK (EndDate IS NULL OR EndDate >= StartDate)
     );
 END;
 
@@ -347,6 +349,12 @@ IF COL_LENGTH('dbo.EmployeeTypes', 'StartDate') IS NULL
 BEGIN
     ALTER TABLE dbo.EmployeeTypes
     ADD StartDate date NULL;
+END;
+
+IF COL_LENGTH('dbo.EmployeeTypes', 'EndDate') IS NULL
+BEGIN
+    ALTER TABLE dbo.EmployeeTypes
+    ADD EndDate date NULL;
 END;
 
 IF OBJECT_ID('dbo.DF_EmployeeTypes_StartDate', 'D') IS NULL
@@ -374,6 +382,12 @@ IF EXISTS (
 )
 BEGIN
     EXEC(N'ALTER TABLE dbo.EmployeeTypes ALTER COLUMN StartDate date NOT NULL;');
+END;
+
+IF OBJECT_ID('dbo.CK_EmployeeTypes_DateRange', 'C') IS NULL
+BEGIN
+    ALTER TABLE dbo.EmployeeTypes
+    ADD CONSTRAINT CK_EmployeeTypes_DateRange CHECK (EndDate IS NULL OR EndDate >= StartDate);
 END;
 
 EXEC(N'
@@ -599,7 +613,7 @@ BEGIN
                 et.ScheduleId,
                 et.EmployeeTypeId,
                 et.StartDate,
-                NULL,
+                et.EndDate,
                 et.DisplayOrder,
                 et.Name,
                 et.PatternId,
@@ -628,7 +642,7 @@ BEGIN
             et.ScheduleId,
             et.EmployeeTypeId,
             et.StartDate,
-            NULL,
+            et.EndDate,
             et.Name,
             et.PatternId,
             ISNULL(et.CreatedAt, SYSUTCDATETIME()),
@@ -638,6 +652,61 @@ BEGIN
         WHERE et.DeletedAt IS NULL
           AND et.IsActive = 1;
     END;
+END;
+
+IF OBJECT_ID('dbo.ShiftOrderMonths', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.ShiftOrderMonths (
+        ScheduleId int NOT NULL,
+        EffectiveMonth date NOT NULL,
+        CreatedAt datetime2 NOT NULL CONSTRAINT DF_ShiftOrderMonths_CreatedAt DEFAULT sysutcdatetime(),
+        CreatedBy nvarchar(64) NULL,
+        UpdatedAt datetime2 NULL,
+        UpdatedBy nvarchar(64) NULL,
+        CONSTRAINT PK_ShiftOrderMonths PRIMARY KEY (ScheduleId, EffectiveMonth),
+        CONSTRAINT FK_ShiftOrderMonths_Schedules FOREIGN KEY (ScheduleId) REFERENCES dbo.Schedules(ScheduleId),
+        CONSTRAINT CK_ShiftOrderMonths_MonthStart CHECK (DAY(EffectiveMonth) = 1)
+    );
+END;
+
+IF OBJECT_ID('dbo.ShiftOrderMonthItems', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.ShiftOrderMonthItems (
+        ScheduleId int NOT NULL,
+        EffectiveMonth date NOT NULL,
+        EmployeeTypeId int NOT NULL,
+        DisplayOrder int NOT NULL,
+        CreatedAt datetime2 NOT NULL CONSTRAINT DF_ShiftOrderMonthItems_CreatedAt DEFAULT sysutcdatetime(),
+        CreatedBy nvarchar(64) NULL,
+        UpdatedAt datetime2 NULL,
+        UpdatedBy nvarchar(64) NULL,
+        CONSTRAINT PK_ShiftOrderMonthItems PRIMARY KEY (ScheduleId, EffectiveMonth, EmployeeTypeId),
+        CONSTRAINT FK_ShiftOrderMonthItems_Months FOREIGN KEY (ScheduleId, EffectiveMonth)
+            REFERENCES dbo.ShiftOrderMonths(ScheduleId, EffectiveMonth),
+        CONSTRAINT FK_ShiftOrderMonthItems_EmployeeTypes FOREIGN KEY (EmployeeTypeId)
+            REFERENCES dbo.EmployeeTypes(EmployeeTypeId),
+        CONSTRAINT CK_ShiftOrderMonthItems_DisplayOrder CHECK (DisplayOrder >= 1)
+    );
+END;
+
+IF NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE name = 'UX_ShiftOrderMonthItems_ScheduleMonth_Order'
+      AND object_id = OBJECT_ID('dbo.ShiftOrderMonthItems')
+)
+BEGIN
+    CREATE UNIQUE INDEX UX_ShiftOrderMonthItems_ScheduleMonth_Order
+    ON dbo.ShiftOrderMonthItems (ScheduleId, EffectiveMonth, DisplayOrder);
+END;
+
+IF NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE name = 'IX_ShiftOrderMonths_Schedule_EffectiveMonth'
+      AND object_id = OBJECT_ID('dbo.ShiftOrderMonths')
+)
+BEGIN
+    CREATE INDEX IX_ShiftOrderMonths_Schedule_EffectiveMonth
+    ON dbo.ShiftOrderMonths (ScheduleId, EffectiveMonth DESC);
 END;
 
 IF OBJECT_ID('dbo.CoverageCodes', 'U') IS NULL
@@ -703,6 +772,43 @@ BEGIN
         ALTER TABLE dbo.CoverageCodes
         ADD CONSTRAINT CK_CoverageCodes_DisplayMode
         CHECK (DisplayMode IN (''Schedule Overlay'', ''Badge Indicator'', ''Shift Override''));
+    ');
+END;
+
+IF COL_LENGTH('dbo.CoverageCodes', 'NotifyImmediately') IS NULL
+BEGIN
+    ALTER TABLE dbo.CoverageCodes
+    ADD NotifyImmediately bit NOT NULL
+        CONSTRAINT DF_CoverageCodes_NotifyImmediately DEFAULT 0;
+END;
+
+IF COL_LENGTH('dbo.CoverageCodes', 'ScheduledRemindersJson') IS NULL
+BEGIN
+    ALTER TABLE dbo.CoverageCodes
+    ADD ScheduledRemindersJson nvarchar(max) NULL;
+END;
+
+IF COL_LENGTH('dbo.CoverageCodes', 'ScheduledRemindersJson') IS NOT NULL
+BEGIN
+    EXEC(N'
+        UPDATE dbo.CoverageCodes
+           SET ScheduledRemindersJson = NULL
+         WHERE ScheduledRemindersJson IS NOT NULL
+           AND ISJSON(ScheduledRemindersJson) <> 1;
+    ');
+END;
+
+IF OBJECT_ID('dbo.CK_CoverageCodes_ScheduledRemindersJson_IsJson', 'C') IS NULL
+AND COL_LENGTH('dbo.CoverageCodes', 'ScheduledRemindersJson') IS NOT NULL
+BEGIN
+    EXEC(N'
+        ALTER TABLE dbo.CoverageCodes
+        ADD CONSTRAINT CK_CoverageCodes_ScheduledRemindersJson_IsJson
+        CHECK (
+            ScheduledRemindersJson IS NULL
+            OR ISJSON(ScheduledRemindersJson) = 1
+            OR LTRIM(RTRIM(ScheduledRemindersJson)) = ''''
+        );
     ');
 END;
 
@@ -817,6 +923,43 @@ IF COL_LENGTH('dbo.ScheduleEvents', 'CustomColor') IS NULL
 BEGIN
     ALTER TABLE dbo.ScheduleEvents
     ADD CustomColor nvarchar(20) NULL;
+END;
+
+IF COL_LENGTH('dbo.ScheduleEvents', 'NotifyImmediately') IS NULL
+BEGIN
+    ALTER TABLE dbo.ScheduleEvents
+    ADD NotifyImmediately bit NOT NULL
+        CONSTRAINT DF_ScheduleEvents_NotifyImmediately DEFAULT 0;
+END;
+
+IF COL_LENGTH('dbo.ScheduleEvents', 'ScheduledRemindersJson') IS NULL
+BEGIN
+    ALTER TABLE dbo.ScheduleEvents
+    ADD ScheduledRemindersJson nvarchar(max) NULL;
+END;
+
+IF COL_LENGTH('dbo.ScheduleEvents', 'ScheduledRemindersJson') IS NOT NULL
+BEGIN
+    EXEC(N'
+        UPDATE dbo.ScheduleEvents
+           SET ScheduledRemindersJson = NULL
+         WHERE ScheduledRemindersJson IS NOT NULL
+           AND ISJSON(ScheduledRemindersJson) <> 1;
+    ');
+END;
+
+IF OBJECT_ID('dbo.CK_ScheduleEvents_ScheduledRemindersJson_IsJson', 'C') IS NULL
+AND COL_LENGTH('dbo.ScheduleEvents', 'ScheduledRemindersJson') IS NOT NULL
+BEGIN
+    EXEC(N'
+        ALTER TABLE dbo.ScheduleEvents
+        ADD CONSTRAINT CK_ScheduleEvents_ScheduledRemindersJson_IsJson
+        CHECK (
+            ScheduledRemindersJson IS NULL
+            OR ISJSON(ScheduledRemindersJson) = 1
+            OR LTRIM(RTRIM(ScheduledRemindersJson)) = ''''
+        );
+    ');
 END;
 
 IF OBJECT_ID('dbo.FK_ScheduleEvents_EmployeeTypes', 'F') IS NULL

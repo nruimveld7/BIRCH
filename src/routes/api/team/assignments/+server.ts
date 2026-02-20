@@ -21,6 +21,7 @@ type ShiftEmailContext = {
 	scheduleName: string;
 	scheduleThemeJson: string | null;
 	targetDisplayName: string;
+	targetEmail: string | null;
 	actorDisplayName: string;
 };
 
@@ -96,27 +97,29 @@ async function getShiftEmailContext(params: {
 		.input('targetUserOid', params.targetUserOid)
 		.input('actorUserOid', params.actorUserOid)
 		.query(
-			`SELECT TOP (1)
-				s.Name AS ScheduleName,
-				s.ThemeJson AS ScheduleThemeJson,
-				COALESCE(NULLIF(tu.DisplayName, ''), NULLIF(tu.FullName, ''), @targetUserOid) AS TargetDisplayName,
-				COALESCE(NULLIF(au.DisplayName, ''), NULLIF(au.FullName, ''), @actorUserOid) AS ActorDisplayName
-			 FROM dbo.Schedules s
-			 LEFT JOIN dbo.Users tu
-				ON tu.UserOid = @targetUserOid
-			   AND tu.DeletedAt IS NULL
-			 LEFT JOIN dbo.Users au
-				ON au.UserOid = @actorUserOid
-			   AND au.DeletedAt IS NULL
-			 WHERE s.ScheduleId = @scheduleId
-			   AND s.DeletedAt IS NULL;`
-		);
+				`SELECT TOP (1)
+					s.Name AS ScheduleName,
+					s.ThemeJson AS ScheduleThemeJson,
+					COALESCE(NULLIF(tu.DisplayName, ''), NULLIF(tu.FullName, ''), @targetUserOid) AS TargetDisplayName,
+					NULLIF(LTRIM(RTRIM(tu.Email)), '') AS TargetEmail,
+					COALESCE(NULLIF(au.DisplayName, ''), NULLIF(au.FullName, ''), @actorUserOid) AS ActorDisplayName
+				 FROM dbo.Schedules s
+				 LEFT JOIN dbo.Users tu
+					ON tu.UserOid = @targetUserOid
+				   AND tu.DeletedAt IS NULL
+				 LEFT JOIN dbo.Users au
+					ON au.UserOid = @actorUserOid
+				   AND au.DeletedAt IS NULL
+				 WHERE s.ScheduleId = @scheduleId
+				   AND s.DeletedAt IS NULL;`
+			);
 	const row = result.recordset?.[0];
 	if (!row) return null;
 	return {
 		scheduleName: String(row.ScheduleName ?? ''),
 		scheduleThemeJson: (row.ScheduleThemeJson as string | null) ?? null,
 		targetDisplayName: String(row.TargetDisplayName ?? params.targetUserOid),
+		targetEmail: row.TargetEmail ? String(row.TargetEmail) : null,
 		actorDisplayName: String(row.ActorDisplayName ?? params.actorUserOid)
 	};
 }
@@ -803,6 +806,7 @@ async function upsertAssignment({
 					await sendShiftChangeNotification({
 						scheduleName: emailContext.scheduleName,
 						themeJson: emailContext.scheduleThemeJson,
+						intendedRecipients: emailContext.targetEmail ? [emailContext.targetEmail] : [],
 						targetMemberName: emailContext.targetDisplayName,
 						date: startDate,
 						previousShift,
@@ -876,6 +880,7 @@ async function upsertAssignment({
 				await sendShiftChangeNotification({
 					scheduleName: emailContext.scheduleName,
 					themeJson: emailContext.scheduleThemeJson,
+					intendedRecipients: emailContext.targetEmail ? [emailContext.targetEmail] : [],
 					targetMemberName: emailContext.targetDisplayName,
 					date: startDate,
 					previousShift,

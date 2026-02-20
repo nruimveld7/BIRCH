@@ -6,6 +6,8 @@
 	import DatePicker from '$lib/components/DatePicker.svelte';
 	import Picker from '$lib/components/Picker.svelte';
 	import ColorPicker from '$lib/components/ColorPicker.svelte';
+	import ThemedCheckbox from '$lib/components/ThemedCheckbox.svelte';
+	import ThemedSpinPicker from '$lib/components/ThemedSpinPicker.svelte';
 	import GroupRow from '$lib/components/GroupRow.svelte';
 	import EmployeeRow from '$lib/components/EmployeeRow.svelte';
 	import type { Employee, Group, ScheduleEvent, Status } from '$lib/types/schedule';
@@ -15,6 +17,13 @@
 	type EventScopeType = 'global' | 'shift' | 'user';
 	type PopupMode = 'list' | 'add' | 'edit';
 	type EventDisplayMode = 'Schedule Overlay' | 'Badge Indicator' | 'Shift Override';
+	type ScheduledReminderDraft = {
+		id: number;
+		amount: number;
+		unit: string;
+		hour: number;
+		meridiem: string;
+	};
 	type EventCodeOption = {
 		eventCodeId: number;
 		code: string;
@@ -22,6 +31,13 @@
 		displayMode: EventDisplayMode;
 		color: string;
 		isActive: boolean;
+		notifyImmediately?: boolean;
+		scheduledReminders?: Array<{
+			amount: number;
+			unit: 'days' | 'weeks' | 'months';
+			hour: number;
+			meridiem: 'AM' | 'PM';
+		}>;
 	};
 	type ScopedEventEntry = {
 		eventId: number;
@@ -35,6 +51,13 @@
 		startDate: string;
 		endDate: string;
 		comments: string;
+		notifyImmediately?: boolean;
+		scheduledReminders?: Array<{
+			amount: number;
+			unit: 'days' | 'weeks' | 'months';
+			hour: number;
+			meridiem: 'AM' | 'PM';
+		}>;
 	};
 	type HoverCellScope = {
 		day: MonthDay;
@@ -127,6 +150,10 @@
 	let addCustomEventName = '';
 	let addCustomEventDisplayMode: EventDisplayMode = 'Schedule Overlay';
 	let addCustomEventColor = '#22c55e';
+	let addReminderImmediate = false;
+	let addReminderScheduled = false;
+	let scheduledReminderDrafts: ScheduledReminderDraft[] = [];
+	let nextScheduledReminderDraftId = 1;
 	let addEventError = '';
 	let hoverTooltipOpen = false;
 	let hoverTooltipLeftPx = 0;
@@ -145,12 +172,17 @@
 	let lastHeaderTouchTapDay: number | null = null;
 	let lastHeaderTouchTapAtMs = 0;
 	let suppressHeaderClickDay: number | null = null;
+	const MAX_SCHEDULED_REMINDERS = 4;
 
 	const eventDisplayModeItems: PickerOption[] = [
 		{ value: 'Schedule Overlay', label: 'Schedule Overlay' },
 		{ value: 'Badge Indicator', label: 'Badge Indicator' },
 		{ value: 'Shift Override', label: 'Shift Override' }
 	];
+	const reminderAmountOptions = Array.from({ length: 31 }, (_, index) => index);
+	const reminderHourOptions = Array.from({ length: 13 }, (_, index) => index);
+	const reminderUnitOptions = ['days', 'weeks', 'months'];
+	const reminderMeridiemOptions = ['AM', 'PM'];
 
 	$: days = monthDays;
 	$: dim = monthDays.length;
@@ -243,6 +275,38 @@
 	function formatPopupDate(day: MonthDay): string {
 		const cellDate = new Date(selectedYear, selectedMonthIndex, day.day);
 		return `${monthNames[cellDate.getMonth()]} ${cellDate.getDate()}, ${cellDate.getFullYear()}`;
+	}
+
+	function formatReminderPreviewDate(date: Date): string {
+		return new Intl.DateTimeFormat('en-US', {
+			month: 'short',
+			day: 'numeric',
+			year: 'numeric'
+		}).format(date);
+	}
+
+	function reminderKey(reminderDraft: ScheduledReminderDraft): string {
+		return `${reminderDraft.amount}|${reminderDraft.unit}|${reminderDraft.hour}|${reminderDraft.meridiem}`;
+	}
+
+	function reminderTargetDate(
+		startDateIso: string,
+		reminderDraft: ScheduledReminderDraft
+	): Date | null {
+		if (!isIsoDate(startDateIso)) return null;
+		const [yearRaw, monthRaw, dayRaw] = startDateIso.split('-');
+		const year = Number(yearRaw);
+		const month = Number(monthRaw);
+		const day = Number(dayRaw);
+		const target = new Date(year, month - 1, day, 12, 0, 0, 0);
+		if (reminderDraft.unit === 'months') {
+			target.setMonth(target.getMonth() - reminderDraft.amount);
+			return target;
+		}
+		const dayOffset =
+			reminderDraft.unit === 'weeks' ? reminderDraft.amount * 7 : reminderDraft.amount;
+		target.setDate(target.getDate() - dayOffset);
+		return target;
 	}
 
 	function refreshScheduleInBackground() {
@@ -550,6 +614,13 @@
 					displayMode: EventDisplayMode;
 					color: string;
 					isActive: boolean;
+					notifyImmediately?: boolean;
+					scheduledReminders?: Array<{
+						amount: number;
+						unit: 'days' | 'weeks' | 'months';
+						hour: number;
+						meridiem: 'AM' | 'PM';
+					}>;
 				}>;
 			};
 			eventCodeOptions = (Array.isArray(data.eventCodes) ? data.eventCodes : [])
@@ -560,7 +631,11 @@
 					name: eventCode.name,
 					displayMode: eventCode.displayMode ?? 'Schedule Overlay',
 					color: eventCode.color,
-					isActive: Boolean(eventCode.isActive)
+					isActive: Boolean(eventCode.isActive),
+					notifyImmediately: Boolean(eventCode.notifyImmediately),
+					scheduledReminders: Array.isArray(eventCode.scheduledReminders)
+						? eventCode.scheduledReminders
+						: []
 				}));
 		} catch (error) {
 			eventCodesError =
@@ -579,12 +654,101 @@
 		addCustomEventName = '';
 		addCustomEventDisplayMode = 'Schedule Overlay';
 		addCustomEventColor = '#22c55e';
+		addReminderImmediate = false;
+		addReminderScheduled = false;
+		scheduledReminderDrafts = [createDefaultScheduledReminderDraft()];
 		addEventError = '';
 		editingEventId = null;
 		eventCodePickerOpen = false;
 		customDisplayModePickerOpen = false;
 		addStartDatePickerOpen = false;
 		addEndDatePickerOpen = false;
+	}
+
+	function createDefaultScheduledReminderDraft(): ScheduledReminderDraft {
+		return {
+			id: nextScheduledReminderDraftId++,
+			amount: 1,
+			unit: 'days',
+			hour: 12,
+			meridiem: 'PM'
+		};
+	}
+
+	function addScheduledReminderDraft() {
+		if (scheduledReminderDrafts.length >= MAX_SCHEDULED_REMINDERS) return;
+		scheduledReminderDrafts = [...scheduledReminderDrafts, createDefaultScheduledReminderDraft()];
+	}
+
+	function removeScheduledReminderDraft(id: number) {
+		if (scheduledReminderDrafts.length <= 1) {
+			addReminderScheduled = false;
+			scheduledReminderDrafts = [createDefaultScheduledReminderDraft()];
+			return;
+		}
+		scheduledReminderDrafts = scheduledReminderDrafts.filter((draft) => draft.id !== id);
+	}
+
+	function updateScheduledReminderDraft(
+		id: number,
+		field: 'amount' | 'unit' | 'hour' | 'meridiem',
+		nextValue: string | number
+	) {
+		scheduledReminderDrafts = scheduledReminderDrafts.map((draft) => {
+			if (draft.id !== id) return draft;
+			if (field === 'amount') {
+				return { ...draft, amount: Number(nextValue) };
+			}
+			if (field === 'hour') {
+				return { ...draft, hour: Number(nextValue) };
+			}
+			if (field === 'unit') {
+				return { ...draft, unit: String(nextValue) };
+			}
+			return { ...draft, meridiem: String(nextValue) };
+		});
+	}
+
+	function applyReminderDefaultsFromEventCode(eventCode: EventCodeOption | null) {
+		if (!eventCode) {
+			addReminderImmediate = false;
+			addReminderScheduled = false;
+			scheduledReminderDrafts = [createDefaultScheduledReminderDraft()];
+			return;
+		}
+
+		addReminderImmediate = Boolean(eventCode.notifyImmediately);
+		const reminders = Array.isArray(eventCode.scheduledReminders)
+			? eventCode.scheduledReminders
+			: [];
+		if (reminders.length > 0) {
+			addReminderScheduled = true;
+			scheduledReminderDrafts = reminders.map((reminder) => ({
+				id: nextScheduledReminderDraftId++,
+				amount: reminder.amount,
+				unit: reminder.unit,
+				hour: reminder.hour,
+				meridiem: reminder.meridiem
+			}));
+			return;
+		}
+
+		addReminderScheduled = false;
+		scheduledReminderDrafts = [createDefaultScheduledReminderDraft()];
+	}
+
+	function handleEventCodeSelection(nextValue: string | number) {
+		addEventCodeId = String(nextValue);
+		if (memberEventsPopupMode !== 'add') return;
+		if (addEventCodeId === 'custom') {
+			applyReminderDefaultsFromEventCode(null);
+			return;
+		}
+		const selectedEventCodeId = Number(addEventCodeId);
+		const selectedEventCode = eventCodeOptions.find(
+			(eventCode) => eventCode.eventCodeId === selectedEventCodeId
+		);
+		applyReminderDefaultsFromEventCode(selectedEventCode ?? null);
 	}
 
 	async function openAddEventView() {
@@ -628,6 +792,21 @@
 		customDisplayModePickerOpen = false;
 		addStartDatePickerOpen = false;
 		addEndDatePickerOpen = false;
+		addReminderImmediate = false;
+		const reminders = Array.isArray(eventRow.scheduledReminders) ? eventRow.scheduledReminders : [];
+		if (reminders.length > 0) {
+			addReminderScheduled = true;
+			scheduledReminderDrafts = reminders.map((reminder) => ({
+				id: nextScheduledReminderDraftId++,
+				amount: reminder.amount,
+				unit: reminder.unit,
+				hour: reminder.hour,
+				meridiem: reminder.meridiem
+			}));
+		} else {
+			addReminderScheduled = false;
+			scheduledReminderDrafts = [createDefaultScheduledReminderDraft()];
+		}
 	}
 
 	function cancelAddEvent() {
@@ -719,7 +898,16 @@
 			startDate: addEventStartDate,
 			endDate: addEventEndDate,
 			comments: addEventComments.trim(),
-			coverageCodeId
+			coverageCodeId,
+			notifyImmediately: addReminderImmediate,
+			scheduledReminders: addReminderScheduled
+				? scheduledReminderDrafts.map((reminderDraft) => ({
+						amount: reminderDraft.amount,
+						unit: reminderDraft.unit,
+						hour: reminderDraft.hour,
+						meridiem: reminderDraft.meridiem
+					}))
+				: []
 		};
 
 		if (customCode) {
@@ -956,6 +1144,27 @@
 		(eventCodesLoading ? 'Loading...' : 'Select event code');
 
 	$: isCustomEventCodeSelected = addEventCodeId === 'custom';
+	$: canAddScheduledReminderDraft = scheduledReminderDrafts.length < MAX_SCHEDULED_REMINDERS;
+	$: if (addReminderScheduled && scheduledReminderDrafts.length === 0) {
+		scheduledReminderDrafts = [createDefaultScheduledReminderDraft()];
+	}
+	$: scheduledReminderSummaryLines = (() => {
+		if (!addReminderScheduled) return [] as string[];
+		const seenReminderKeys = new Set<string>();
+		const lines: string[] = [];
+		for (const reminderDraft of scheduledReminderDrafts) {
+			const key = reminderKey(reminderDraft);
+			if (seenReminderKeys.has(key)) continue;
+			seenReminderKeys.add(key);
+			const targetDate = reminderTargetDate(addEventStartDate, reminderDraft);
+			if (!targetDate) continue;
+			lines.push(
+				`${reminderDraft.hour} ${reminderDraft.meridiem} on ${formatReminderPreviewDate(targetDate)}`
+			);
+		}
+		return lines;
+	})();
+	$: scheduledReminderSummaryTitle = `${scheduledReminderSummaryLines.length} Scheduled Reminder${scheduledReminderSummaryLines.length === 1 ? '' : 's'}`;
 
 	$: selectedCustomDisplayModeLabel =
 		eventDisplayModeItems.find((item) => item.value === addCustomEventDisplayMode)?.label ??
@@ -1849,9 +2058,7 @@
 										selectedLabel={selectedEventCodeLabel}
 										open={eventCodePickerOpen}
 										onOpenChange={setEventCodePickerOpen}
-										on:select={(event) => {
-											addEventCodeId = String(event.detail);
-										}}
+										on:select={(event) => handleEventCodeSelection(event.detail)}
 									/>
 								</div>
 							</div>
@@ -1889,6 +2096,113 @@
 									/>
 								</div>
 							</div>
+
+							{#if !isCustomEventCodeSelected}
+								<div class="memberEventReminderSection">
+									<div class="memberEventCustomTitle">Reminders</div>
+									<ThemedCheckbox
+										id="event-reminder-immediate"
+										bind:checked={addReminderImmediate}
+										label="Notify Immediately"
+									/>
+									<ThemedCheckbox
+										id="event-reminder-scheduled"
+										bind:checked={addReminderScheduled}
+										label="Scheduled Reminders"
+									/>
+									{#if addReminderScheduled}
+										<div class="memberEventReminderPickerStack">
+											<div class="memberEventReminderHeaderRow" aria-hidden="true">
+												<span>Amount</span>
+												<span>Unit</span>
+												<span>Time</span>
+												<span>AM/PM</span>
+												<span class="memberEventReminderHeaderAction"></span>
+											</div>
+											{#each scheduledReminderDrafts as reminderDraft (reminderDraft.id)}
+												<div class="memberEventReminderRowWrap">
+													<div class="memberEventReminderPickerRow">
+														<ThemedSpinPicker
+															id={`event-reminder-amount-${reminderDraft.id}`}
+															options={reminderAmountOptions}
+															value={reminderDraft.amount}
+															on:value={(event) =>
+																updateScheduledReminderDraft(
+																	reminderDraft.id,
+																	'amount',
+																	event.detail
+																)}
+														/>
+														<ThemedSpinPicker
+															id={`event-reminder-unit-${reminderDraft.id}`}
+															options={reminderUnitOptions}
+															value={reminderDraft.unit}
+															on:value={(event) =>
+																updateScheduledReminderDraft(
+																	reminderDraft.id,
+																	'unit',
+																	event.detail
+																)}
+														/>
+														<ThemedSpinPicker
+															id={`event-reminder-hour-${reminderDraft.id}`}
+															options={reminderHourOptions}
+															value={reminderDraft.hour}
+															on:value={(event) =>
+																updateScheduledReminderDraft(
+																	reminderDraft.id,
+																	'hour',
+																	event.detail
+																)}
+														/>
+														<ThemedSpinPicker
+															id={`event-reminder-meridiem-${reminderDraft.id}`}
+															options={reminderMeridiemOptions}
+															value={reminderDraft.meridiem}
+															on:value={(event) =>
+																updateScheduledReminderDraft(
+																	reminderDraft.id,
+																	'meridiem',
+																	event.detail
+																)}
+														/>
+													</div>
+													<button
+														type="button"
+														class="memberEventReminderRemoveBtn"
+														on:click={() => removeScheduledReminderDraft(reminderDraft.id)}
+														aria-label="Remove scheduled reminder"
+													>
+														<svg viewBox="0 0 24 24" aria-hidden="true">
+															<path d="M6 6l12 12M18 6L6 18" />
+														</svg>
+													</button>
+												</div>
+											{/each}
+											{#if canAddScheduledReminderDraft}
+												<button
+													type="button"
+													class="memberEventAddRowBtn memberEventReminderAddBtn"
+													on:click={addScheduledReminderDraft}
+													aria-label="Add another scheduled reminder"
+												>
+													<svg viewBox="0 0 24 24" aria-hidden="true">
+														<path d="M12 5v14M5 12h14" />
+													</svg>
+												</button>
+											{/if}
+											<div class="memberEventReminderSummary">
+												<div class="memberEventReminderSummaryTitle">
+													{scheduledReminderSummaryTitle}
+												</div>
+												{#each scheduledReminderSummaryLines as reminderSummaryLine}
+													<div class="memberEventReminderSummaryLine">{reminderSummaryLine}</div>
+												{/each}
+											</div>
+										</div>
+									{/if}
+								</div>
+							{/if}
 
 							{#if isCustomEventCodeSelected}
 								<div class="memberEventCustomSection">
@@ -1947,6 +2261,111 @@
 											/>
 										</label>
 									</div>
+								</div>
+
+								<div class="memberEventReminderSection">
+									<div class="memberEventCustomTitle">Reminders</div>
+									<ThemedCheckbox
+										id="event-reminder-immediate-custom"
+										bind:checked={addReminderImmediate}
+										label="Notify Immediately"
+									/>
+									<ThemedCheckbox
+										id="event-reminder-scheduled-custom"
+										bind:checked={addReminderScheduled}
+										label="Scheduled Reminders"
+									/>
+									{#if addReminderScheduled}
+										<div class="memberEventReminderPickerStack">
+											<div class="memberEventReminderHeaderRow" aria-hidden="true">
+												<span>Amount</span>
+												<span>Unit</span>
+												<span>Time</span>
+												<span>AM/PM</span>
+												<span class="memberEventReminderHeaderAction"></span>
+											</div>
+											{#each scheduledReminderDrafts as reminderDraft (reminderDraft.id)}
+												<div class="memberEventReminderRowWrap">
+													<div class="memberEventReminderPickerRow">
+														<ThemedSpinPicker
+															id={`event-reminder-amount-custom-${reminderDraft.id}`}
+															options={reminderAmountOptions}
+															value={reminderDraft.amount}
+															on:value={(event) =>
+																updateScheduledReminderDraft(
+																	reminderDraft.id,
+																	'amount',
+																	event.detail
+																)}
+														/>
+														<ThemedSpinPicker
+															id={`event-reminder-unit-custom-${reminderDraft.id}`}
+															options={reminderUnitOptions}
+															value={reminderDraft.unit}
+															on:value={(event) =>
+																updateScheduledReminderDraft(
+																	reminderDraft.id,
+																	'unit',
+																	event.detail
+																)}
+														/>
+														<ThemedSpinPicker
+															id={`event-reminder-hour-custom-${reminderDraft.id}`}
+															options={reminderHourOptions}
+															value={reminderDraft.hour}
+															on:value={(event) =>
+																updateScheduledReminderDraft(
+																	reminderDraft.id,
+																	'hour',
+																	event.detail
+																)}
+														/>
+														<ThemedSpinPicker
+															id={`event-reminder-meridiem-custom-${reminderDraft.id}`}
+															options={reminderMeridiemOptions}
+															value={reminderDraft.meridiem}
+															on:value={(event) =>
+																updateScheduledReminderDraft(
+																	reminderDraft.id,
+																	'meridiem',
+																	event.detail
+																)}
+														/>
+													</div>
+													<button
+														type="button"
+														class="memberEventReminderRemoveBtn"
+														on:click={() => removeScheduledReminderDraft(reminderDraft.id)}
+														aria-label="Remove scheduled reminder"
+													>
+														<svg viewBox="0 0 24 24" aria-hidden="true">
+															<path d="M6 6l12 12M18 6L6 18" />
+														</svg>
+													</button>
+												</div>
+											{/each}
+											{#if canAddScheduledReminderDraft}
+												<button
+													type="button"
+													class="memberEventAddRowBtn memberEventReminderAddBtn"
+													on:click={addScheduledReminderDraft}
+													aria-label="Add another scheduled reminder"
+												>
+													<svg viewBox="0 0 24 24" aria-hidden="true">
+														<path d="M12 5v14M5 12h14" />
+													</svg>
+												</button>
+											{/if}
+											<div class="memberEventReminderSummary">
+												<div class="memberEventReminderSummaryTitle">
+													{scheduledReminderSummaryTitle}
+												</div>
+												{#each scheduledReminderSummaryLines as reminderSummaryLine}
+													<div class="memberEventReminderSummaryLine">{reminderSummaryLine}</div>
+												{/each}
+											</div>
+										</div>
+									{/if}
 								</div>
 							{/if}
 

@@ -13,6 +13,12 @@ type EventCodeRow = {
 	DisplayMode: EventCodeDisplayMode | null;
 	Color: string | null;
 	IsActive: boolean;
+	NotifyImmediately: boolean | null;
+	ScheduledRemindersJson: string | null;
+};
+
+type CoverageCodesCapabilities = {
+	hasReminderColumns: boolean;
 };
 
 const allowedDisplayModes = new Set<EventCodeDisplayMode>([
@@ -56,6 +62,24 @@ async function getActorContext(localsUserOid: string, cookies: Cookies) {
 	}
 
 	return { pool, scheduleId, actorOid: localsUserOid };
+}
+
+async function getCoverageCodesCapabilities(
+	pool: Awaited<ReturnType<typeof GetPool>>
+): Promise<CoverageCodesCapabilities> {
+	const result = await pool.request().query(
+		`SELECT COLUMN_NAME
+		 FROM INFORMATION_SCHEMA.COLUMNS
+		 WHERE TABLE_SCHEMA = 'dbo'
+		   AND TABLE_NAME = 'CoverageCodes';`
+	);
+	const columns = new Set<string>(
+		(result.recordset as Array<{ COLUMN_NAME: string }>).map((row) => row.COLUMN_NAME)
+	);
+	return {
+		hasReminderColumns:
+			columns.has('NotifyImmediately') && columns.has('ScheduledRemindersJson')
+	};
 }
 
 function cleanCode(value: unknown): string {
@@ -108,6 +132,76 @@ function cleanIsActive(value: unknown): boolean {
 	return value;
 }
 
+function cleanNotifyImmediately(value: unknown): boolean {
+	if (typeof value === 'boolean') return value;
+	if (value === null || value === undefined) return false;
+	throw error(400, 'Notify immediately is invalid');
+}
+
+type ReminderUnit = 'days' | 'weeks' | 'months';
+type ReminderMeridiem = 'AM' | 'PM';
+type ReminderDraft = {
+	amount: number;
+	unit: ReminderUnit;
+	hour: number;
+	meridiem: ReminderMeridiem;
+};
+
+function cleanScheduledRemindersJson(value: unknown): string | null {
+	if (value === null || value === undefined || value === '') return null;
+	if (!Array.isArray(value)) {
+		throw error(400, 'Scheduled reminders are invalid');
+	}
+	const normalized: ReminderDraft[] = [];
+	const seenKeys = new Set<string>();
+	for (const entry of value) {
+		if (!entry || typeof entry !== 'object') continue;
+		const row = entry as Record<string, unknown>;
+		const amount = Number(row.amount);
+		const hour = Number(row.hour);
+		const unit = row.unit;
+		const meridiem = row.meridiem;
+		if (!Number.isInteger(amount) || amount < 0 || amount > 30) {
+			throw error(400, 'Scheduled reminder amount must be an integer between 0 and 30');
+		}
+		if (unit !== 'days' && unit !== 'weeks' && unit !== 'months') {
+			throw error(400, 'Scheduled reminder unit is invalid');
+		}
+		if (!Number.isInteger(hour) || hour < 0 || hour > 12) {
+			throw error(400, 'Scheduled reminder hour must be an integer between 0 and 12');
+		}
+		if (meridiem !== 'AM' && meridiem !== 'PM') {
+			throw error(400, 'Scheduled reminder AM/PM is invalid');
+		}
+		const key = `${amount}|${unit}|${hour}|${meridiem}`;
+		if (seenKeys.has(key)) continue;
+		seenKeys.add(key);
+		normalized.push({ amount, unit, hour, meridiem });
+	}
+	if (normalized.length === 0) return null;
+	return JSON.stringify(normalized);
+}
+
+function parseScheduledRemindersJson(value: string | null): ReminderDraft[] {
+	if (!value) return [];
+	try {
+		const parsed = JSON.parse(value) as unknown;
+		if (!Array.isArray(parsed)) return [];
+		return parsed.filter((entry) => {
+			if (!entry || typeof entry !== 'object') return false;
+			const row = entry as Record<string, unknown>;
+			return (
+				Number.isInteger(Number(row.amount)) &&
+				(row.unit === 'days' || row.unit === 'weeks' || row.unit === 'months') &&
+				Number.isInteger(Number(row.hour)) &&
+				(row.meridiem === 'AM' || row.meridiem === 'PM')
+			);
+		}) as ReminderDraft[];
+	} catch {
+		return [];
+	}
+}
+
 function cleanEventCodeId(value: unknown): number {
 	const parsed = Number(value);
 	if (!Number.isInteger(parsed) || parsed <= 0) {
@@ -123,6 +217,13 @@ export const GET: RequestHandler = async ({ locals, cookies }) => {
 	}
 
 	const { pool, scheduleId } = await getActorContext(currentUser.id, cookies);
+	const capabilities = await getCoverageCodesCapabilities(pool);
+	const selectNotifyImmediately = capabilities.hasReminderColumns
+		? 'NotifyImmediately'
+		: 'CAST(0 AS bit) AS NotifyImmediately';
+	const selectScheduledRemindersJson = capabilities.hasReminderColumns
+		? 'ScheduledRemindersJson'
+		: 'CAST(NULL AS nvarchar(max)) AS ScheduledRemindersJson';
 	const result = await pool.request().input('scheduleId', scheduleId).query(
 		`SELECT
 			CoverageCodeId,
@@ -130,7 +231,9 @@ export const GET: RequestHandler = async ({ locals, cookies }) => {
 			Label,
 			DisplayMode,
 			Color,
-			IsActive
+			IsActive,
+			${selectNotifyImmediately},
+			${selectScheduledRemindersJson}
 		 FROM dbo.CoverageCodes
 		 WHERE ScheduleId = @scheduleId
 		   AND DeletedAt IS NULL
@@ -143,7 +246,9 @@ export const GET: RequestHandler = async ({ locals, cookies }) => {
 		name: row.Label?.trim() || row.Code?.trim() || '',
 		displayMode: (row.DisplayMode ?? 'Schedule Overlay') as EventCodeDisplayMode,
 		color: row.Color?.trim() || '#22c55e',
-		isActive: Boolean(row.IsActive)
+		isActive: Boolean(row.IsActive),
+		notifyImmediately: Boolean(row.NotifyImmediately),
+		scheduledReminders: parseScheduledRemindersJson(row.ScheduledRemindersJson)
 	}));
 
 	return json({ eventCodes });
@@ -162,6 +267,9 @@ export const POST: RequestHandler = async ({ locals, cookies, request }) => {
 	const displayMode = cleanDisplayMode(body?.displayMode);
 	const color = cleanColor(body?.color);
 	const isActive = cleanIsActive(body?.isActive);
+	const notifyImmediately = cleanNotifyImmediately(body?.notifyImmediately);
+	const scheduledRemindersJson = cleanScheduledRemindersJson(body?.scheduledReminders);
+	const capabilities = await getCoverageCodesCapabilities(pool);
 
 	const duplicateResult = await pool
 		.request()
@@ -189,6 +297,31 @@ export const POST: RequestHandler = async ({ locals, cookies, request }) => {
 		);
 	const nextSortOrder = Number(countResult.recordset?.[0]?.EventCodeCount ?? 0) + 1;
 
+	const insertColumns = [
+		'ScheduleId',
+		'Code',
+		'Label',
+		'DisplayMode',
+		'Color',
+		'SortOrder',
+		'IsActive',
+		'CreatedBy'
+	];
+	const insertValues = [
+		'@scheduleId',
+		'@code',
+		'@name',
+		'@displayMode',
+		'@color',
+		'@sortOrder',
+		'@isActive',
+		'@actorOid'
+	];
+	if (capabilities.hasReminderColumns) {
+		insertColumns.splice(7, 0, 'NotifyImmediately', 'ScheduledRemindersJson');
+		insertValues.splice(7, 0, '@notifyImmediately', '@scheduledRemindersJson');
+	}
+
 	await pool
 		.request()
 		.input('scheduleId', scheduleId)
@@ -197,29 +330,13 @@ export const POST: RequestHandler = async ({ locals, cookies, request }) => {
 		.input('displayMode', displayMode)
 		.input('color', color)
 		.input('isActive', isActive)
+		.input('notifyImmediately', notifyImmediately)
+		.input('scheduledRemindersJson', scheduledRemindersJson)
 		.input('sortOrder', nextSortOrder)
 		.input('actorOid', actorOid)
 		.query(
-			`INSERT INTO dbo.CoverageCodes (
-				ScheduleId,
-				Code,
-				Label,
-				DisplayMode,
-				Color,
-				SortOrder,
-				IsActive,
-				CreatedBy
-			)
-			VALUES (
-				@scheduleId,
-				@code,
-				@name,
-				@displayMode,
-				@color,
-				@sortOrder,
-				@isActive,
-				@actorOid
-			);`
+			`INSERT INTO dbo.CoverageCodes (${insertColumns.join(', ')})
+			 VALUES (${insertValues.join(', ')});`
 		);
 
 	return json({ success: true }, { status: 201 });
@@ -239,6 +356,9 @@ export const PATCH: RequestHandler = async ({ locals, cookies, request }) => {
 	const displayMode = cleanDisplayMode(body?.displayMode);
 	const color = cleanColor(body?.color);
 	const isActive = cleanIsActive(body?.isActive);
+	const notifyImmediately = cleanNotifyImmediately(body?.notifyImmediately);
+	const scheduledRemindersJson = cleanScheduledRemindersJson(body?.scheduledReminders);
+	const capabilities = await getCoverageCodesCapabilities(pool);
 
 	const existsResult = await pool
 		.request()
@@ -272,6 +392,17 @@ export const PATCH: RequestHandler = async ({ locals, cookies, request }) => {
 		throw error(400, 'An event code with this code already exists in this schedule.');
 	}
 
+	const setClauses = [
+		'Code = @code',
+		'Label = @name',
+		'DisplayMode = @displayMode',
+		'Color = @color',
+		'IsActive = @isActive'
+	];
+	if (capabilities.hasReminderColumns) {
+		setClauses.push('NotifyImmediately = @notifyImmediately', 'ScheduledRemindersJson = @scheduledRemindersJson');
+	}
+
 	await pool
 		.request()
 		.input('scheduleId', scheduleId)
@@ -281,13 +412,11 @@ export const PATCH: RequestHandler = async ({ locals, cookies, request }) => {
 		.input('displayMode', displayMode)
 		.input('color', color)
 		.input('isActive', isActive)
+		.input('notifyImmediately', notifyImmediately)
+		.input('scheduledRemindersJson', scheduledRemindersJson)
 		.query(
 			`UPDATE dbo.CoverageCodes
-			 SET Code = @code,
-				 Label = @name,
-				 DisplayMode = @displayMode,
-				 Color = @color,
-				 IsActive = @isActive
+			 SET ${setClauses.join(', ')}
 			 WHERE ScheduleId = @scheduleId
 			   AND CoverageCodeId = @eventCodeId
 			   AND DeletedAt IS NULL;`

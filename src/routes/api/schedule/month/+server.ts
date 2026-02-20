@@ -2,6 +2,7 @@ import { error, json } from '@sveltejs/kit';
 import type { Cookies, RequestHandler } from '@sveltejs/kit';
 import { GetPool } from '$lib/server/db';
 import { getActiveScheduleId } from '$lib/server/auth';
+import { resolveShiftOrderForMonth } from '$lib/server/shift-order';
 
 type ShiftSectionRow = {
 	EmployeeTypeId: number;
@@ -405,28 +406,28 @@ export const GET: RequestHandler = async ({ locals, cookies, url }) => {
 		.input('monthStart', monthStart)
 		.input('monthEnd', monthEnd)
 		.query(
-			hasVersions
-				? `SELECT
-					et.EmployeeTypeId,
-					et.DisplayOrder,
-					COALESCE(vMonthEnd.Name, vWindowLatest.Name, et.Name) AS Name
-				FROM dbo.EmployeeTypes et
-				OUTER APPLY (
-					SELECT TOP (1) etv.Name
-					FROM dbo.EmployeeTypeVersions etv
-					WHERE etv.ScheduleId = et.ScheduleId
-					  AND etv.EmployeeTypeId = et.EmployeeTypeId
+				hasVersions
+					? `SELECT
+						et.EmployeeTypeId,
+						COALESCE(vMonthEnd.DisplayOrder, vWindowLatest.DisplayOrder, et.DisplayOrder) AS DisplayOrder,
+						COALESCE(vMonthEnd.Name, vWindowLatest.Name, et.Name) AS Name
+					FROM dbo.EmployeeTypes et
+					OUTER APPLY (
+						SELECT TOP (1) etv.Name, etv.DisplayOrder
+						FROM dbo.EmployeeTypeVersions etv
+						WHERE etv.ScheduleId = et.ScheduleId
+						  AND etv.EmployeeTypeId = et.EmployeeTypeId
 					  AND etv.IsActive = 1
 					  AND etv.DeletedAt IS NULL
 					  AND etv.StartDate <= @monthEnd
 					  AND (etv.EndDate IS NULL OR etv.EndDate >= @monthEnd)
-					ORDER BY etv.StartDate DESC, etv.CreatedAt DESC
-				) vMonthEnd
-				OUTER APPLY (
-					SELECT TOP (1) etv.Name
-					FROM dbo.EmployeeTypeVersions etv
-					WHERE etv.ScheduleId = et.ScheduleId
-					  AND etv.EmployeeTypeId = et.EmployeeTypeId
+						ORDER BY etv.StartDate DESC, etv.CreatedAt DESC
+					) vMonthEnd
+					OUTER APPLY (
+						SELECT TOP (1) etv.Name, etv.DisplayOrder
+						FROM dbo.EmployeeTypeVersions etv
+						WHERE etv.ScheduleId = et.ScheduleId
+						  AND etv.EmployeeTypeId = et.EmployeeTypeId
 					  AND etv.IsActive = 1
 					  AND etv.DeletedAt IS NULL
 					  AND etv.StartDate <= @monthEnd
@@ -443,10 +444,10 @@ export const GET: RequestHandler = async ({ locals, cookies, url }) => {
 					  AND etv.EmployeeTypeId = et.EmployeeTypeId
 					  AND etv.IsActive = 1
 					  AND etv.DeletedAt IS NULL
-					  AND etv.StartDate <= @monthEnd
-					  AND (etv.EndDate IS NULL OR etv.EndDate >= @monthStart)
-				  )
-				ORDER BY et.DisplayOrder ASC, Name ASC, et.EmployeeTypeId ASC;`
+						  AND etv.StartDate <= @monthEnd
+						  AND (etv.EndDate IS NULL OR etv.EndDate >= @monthStart)
+					  )
+					ORDER BY DisplayOrder ASC, Name ASC, et.EmployeeTypeId ASC;`
 				: `SELECT
 					et.EmployeeTypeId,
 					et.DisplayOrder,
@@ -459,10 +460,27 @@ export const GET: RequestHandler = async ({ locals, cookies, url }) => {
 					ORDER BY et.DisplayOrder ASC, et.Name ASC, et.EmployeeTypeId ASC;`
 		);
 
-	const shiftRows = (result.recordset as ShiftSectionRow[]).map((row) => ({
+const shiftRows = (result.recordset as ShiftSectionRow[]).map((row) => ({
 		employeeTypeId: Number(row.EmployeeTypeId),
 		category: row.Name?.trim() || `Shift ${row.EmployeeTypeId}`
 	}));
+	const fallbackShiftOrder = (result.recordset as ShiftSectionRow[]).map((row) =>
+		Number(row.EmployeeTypeId)
+	);
+	const orderedShiftIds = await resolveShiftOrderForMonth({
+		runner: pool,
+		scheduleId,
+		monthStart,
+		activeShiftIds: shiftRows.map((row) => row.employeeTypeId),
+		fallbackOrderedIds: fallbackShiftOrder
+	});
+	const orderMap = new Map(orderedShiftIds.map((id, index) => [id, index]));
+	shiftRows.sort((a, b) => {
+		const aOrder = orderMap.get(a.employeeTypeId) ?? Number.MAX_SAFE_INTEGER;
+		const bOrder = orderMap.get(b.employeeTypeId) ?? Number.MAX_SAFE_INTEGER;
+		if (aOrder !== bOrder) return aOrder - bOrder;
+		return a.category.localeCompare(b.category);
+	});
 
 	const assignmentsResult = await pool
 		.request()

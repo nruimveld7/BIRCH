@@ -4,17 +4,13 @@
 	import DatePicker from '$lib/components/DatePicker.svelte';
 	import HorizontalScrollArea from '$lib/components/HorizontalScrollArea.svelte';
 	import Picker, { type PickerItem } from '$lib/components/Picker.svelte';
+	import ReorderTable from '$lib/components/ReorderTable.svelte';
+	import ThemedCheckbox from '$lib/components/ThemedCheckbox.svelte';
+	import ThemedSpinPicker from '$lib/components/ThemedSpinPicker.svelte';
 	import { fetchWithAuthRedirect as fetchWithAuthRedirectUtil } from '$lib/utils/fetchWithAuthRedirect';
 	import { onDestroy, onMount, tick } from 'svelte';
 
-	type SetupSection =
-		| 'users'
-		| 'shifts'
-		| 'shiftsWorkshop'
-		| 'patterns'
-		| 'eventCodes'
-		| 'assignments'
-		| 'assignmentsWorkshop';
+	type SetupSection = 'users' | 'shifts' | 'patterns' | 'eventCodes' | 'assignments';
 	type UserRole = 'Member' | 'Maintainer' | 'Manager';
 	type UsersViewMode = 'list' | 'add' | 'edit';
 	type ShiftsViewMode = 'list' | 'add' | 'edit';
@@ -33,6 +29,7 @@
 		pattern: string;
 		patternId: number | null;
 		startDate: string;
+		endDate?: string | null;
 		changes?: ShiftChangeRow[];
 	};
 	type ShiftChangeRow = {
@@ -83,6 +80,20 @@
 		displayMode: EventCodeDisplayMode;
 		color: string;
 		isActive: boolean;
+		notifyImmediately?: boolean;
+		scheduledReminders?: Array<{
+			amount: number;
+			unit: 'days' | 'weeks' | 'months';
+			hour: number;
+			meridiem: 'AM' | 'PM';
+		}>;
+	};
+	type EventCodeReminderDraft = {
+		id: number;
+		amount: number;
+		unit: string;
+		hour: number;
+		meridiem: string;
 	};
 	type RemoveUserErrorPayload = {
 		code?: string;
@@ -93,6 +104,9 @@
 		code?: string;
 		message?: string;
 		activeAssignmentCount?: number;
+		assignmentCount?: number;
+		shiftEventCount?: number;
+		shiftChangeCount?: number;
 	};
 	type EntraUser = {
 		id: string;
@@ -126,7 +140,10 @@
 	let eventCodeSortKey: EventCodeSortKey = 'code';
 	let eventCodeSortDirection: SortDirection = 'asc';
 	let modalScrollEl: HTMLDivElement | null = null;
+	let modalBodyEl: HTMLDivElement | null = null;
 	let railEl: HTMLDivElement | null = null;
+	let modalResizeObserver: ResizeObserver | null = null;
+	let modalMutationObserver: MutationObserver | null = null;
 	let showCustomScrollbar = false;
 	let thumbHeightPx = 0;
 	let thumbTopPx = 0;
@@ -169,9 +186,28 @@
 	let shiftsWorkshopMonthPickerOpen = false;
 	let addShiftActionError = '';
 	let addShiftActionLoading = false;
-	let draggingShiftEmployeeTypeId: number | null = null;
-	let dragOverShiftEmployeeTypeId: number | null = null;
 	let isShiftReorderLoading = false;
+	let shiftsWorkshopTableEl: HTMLTableElement | null = null;
+	let shiftsWorkshopTbodyEl: HTMLTableSectionElement | null = null;
+	let shiftReorderGhostEl: HTMLDivElement | null = null;
+	const shiftReorderDebugEnabled = true;
+	let shiftReorderMoveLogCount = 0;
+	let shiftReorderLastMoveLogAt = 0;
+	let lastGhostRenderState = false;
+	type ShiftReorderState = {
+		sourceId: number;
+		handle: HTMLButtonElement;
+		offsetX: number;
+		offsetY: number;
+		currentBeforeId: number | null;
+		ghostX: number;
+		ghostY: number;
+		ghostWidth: number;
+		rowHeight: number;
+	};
+	let shiftReorderState: ShiftReorderState | null = null;
+	let shiftReorderGhostShift: ShiftRow | null = null;
+	let shiftReorderOptimisticOrder: { month: string; orderedIds: number[] } | null = null;
 	let addPatternName = '';
 	let addPatternActionError = '';
 	let addPatternActionLoading = false;
@@ -199,6 +235,10 @@
 	let addEventCodeDisplayMode: EventCodeDisplayMode = 'Schedule Overlay';
 	let addEventCodeColor = '#22c55e';
 	let addEventCodeIsActive = true;
+	let addEventCodeReminderImmediate = false;
+	let addEventCodeReminderScheduled = false;
+	let eventCodeReminderDrafts: EventCodeReminderDraft[] = [];
+	let nextEventCodeReminderDraftId = 1;
 	let eventCodeDisplayModePickerOpen = false;
 	let eventCodeActionError = '';
 	let eventCodeActionLoading = false;
@@ -237,12 +277,15 @@
 	const sections: { id: SetupSection; label: string }[] = [
 		{ id: 'users', label: 'Users' },
 		{ id: 'shifts', label: 'Shifts' },
-		{ id: 'shiftsWorkshop', label: 'Shifts Workshop' },
 		{ id: 'patterns', label: 'Shift Patterns' },
 		{ id: 'assignments', label: 'Assignments' },
-		{ id: 'assignmentsWorkshop', label: 'Assignments Workshop' },
 		{ id: 'eventCodes', label: 'Event Codes' }
 	];
+	const EVENT_CODE_MAX_REMINDERS = 4;
+	const eventCodeReminderAmountOptions = Array.from({ length: 31 }, (_, index) => index);
+	const eventCodeReminderHourOptions = Array.from({ length: 13 }, (_, index) => index);
+	const eventCodeReminderUnitOptions = ['days', 'weeks', 'months'];
+	const eventCodeReminderMeridiemOptions = ['AM', 'PM'];
 
 	const patternEditorDays = Array.from({ length: 28 }, (_, index) => index + 1);
 	const noShiftOwner = -2;
@@ -292,6 +335,10 @@
 		resetAssignmentsPane();
 	}
 
+	function isWorkshopLikeShiftsSection(section: SetupSection): boolean {
+		return section === 'shifts';
+	}
+
 	function closeModal() {
 		onClose();
 	}
@@ -325,6 +372,25 @@
 		await Promise.all(refreshTasks);
 	}
 
+	function logShiftReorderDebug(message: string, details?: Record<string, unknown>) {
+		if (!shiftReorderDebugEnabled || typeof console === 'undefined') return;
+		if (details) {
+			console.log(`[ShiftReorderDebug] ${message}`, details);
+			return;
+		}
+		console.log(`[ShiftReorderDebug] ${message}`);
+	}
+
+	function applyShiftReorderGhostPosition(x: number, y: number, width: number) {
+		if (!shiftReorderGhostEl) return;
+		shiftReorderGhostEl.style.setProperty('width', `${Math.round(width)}px`, 'important');
+		shiftReorderGhostEl.style.setProperty(
+			'transform',
+			`translate(${Math.round(x)}px, ${Math.round(y)}px) rotate(0.3deg) scale(1.008)`,
+			'important'
+		);
+	}
+
 	function adjustNumericInput(
 		value: string,
 		delta: number,
@@ -346,7 +412,14 @@
 
 	function handleWindowKeydown(event: KeyboardEvent) {
 		if (!open) return;
-		if (event.key === 'Escape') closeModal();
+		if (event.key === 'Escape') {
+			if (shiftReorderState) {
+				event.preventDefault();
+				void stopShiftReorder(false);
+				return;
+			}
+			closeModal();
+		}
 	}
 
 	function resetAddUserResultsScrollbarState() {
@@ -504,10 +577,42 @@
 		shiftsWorkshopMonthPickerOpen = next;
 	}
 
+	function handleShiftsWorkshopMonthChange(nextMonth: string) {
+		shiftsWorkshopMonth = nextMonth;
+		if (open && isWorkshopLikeShiftsSection(activeSection) && shiftsViewMode === 'list') {
+			void loadTeamShifts();
+		}
+	}
+
 	function isValidDate(value: string): boolean {
 		if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
-		const parsed = new Date(`${value}T00:00:00Z`);
-		return !Number.isNaN(parsed.getTime());
+		const [yearText, monthText, dayText] = value.split('-');
+		const year = Number(yearText);
+		const month = Number(monthText);
+		const day = Number(dayText);
+		const parsed = new Date(Date.UTC(year, month - 1, day));
+		if (Number.isNaN(parsed.getTime())) return false;
+		return (
+			parsed.getUTCFullYear() === year &&
+			parsed.getUTCMonth() + 1 === month &&
+			parsed.getUTCDate() === day
+		);
+	}
+
+	function formatDateForDisplay(value: string): string {
+		if (!isValidDate(value)) return value;
+		const [yearText, monthText, dayText] = value.split('-');
+		const month = Number(monthText);
+		const day = Number(dayText);
+		return `${month}/${day}/${yearText}`;
+	}
+
+	function formatOptionalDateForDisplay(
+		value: string | null | undefined,
+		emptyLabel: string
+	): string {
+		if (!value) return emptyLabel;
+		return formatDateForDisplay(value);
 	}
 
 	function monthBounds(monthValue: string): { start: string; end: string } | null {
@@ -531,7 +636,8 @@
 	function shiftChangeOverlapsMonth(change: ShiftChangeRow, monthValue: string): boolean {
 		const bounds = monthBounds(monthValue);
 		if (!bounds || !isValidDate(change.startDate)) return true;
-		const effectiveEnd = change.endDate && isValidDate(change.endDate) ? change.endDate : '9999-12-31';
+		const effectiveEnd =
+			change.endDate && isValidDate(change.endDate) ? change.endDate : '9999-12-31';
 		return change.startDate <= bounds.end && effectiveEnd >= bounds.start;
 	}
 
@@ -550,82 +656,229 @@
 		return Number.isFinite(resolved) && resolved > 0 ? resolved : shift.sortOrder;
 	}
 
-	function displayShiftEndDate(shift: ShiftRow): string {
-		if (activeSection !== 'shiftsWorkshop') {
-			return 'Indefinite';
-		}
-		const matchingChanges = (shift.changes ?? [])
-			.filter((change) => shiftChangeOverlapsMonth(change, shiftsWorkshopMonth))
+	function shiftChangesForMonth(
+		shift: ShiftRow,
+		monthValue: string = shiftsWorkshopMonth
+	): ShiftChangeRow[] {
+		return (shift.changes ?? [])
+			.filter((change) => shiftChangeOverlapsMonth(change, monthValue))
 			.sort((a, b) => a.startDate.localeCompare(b.startDate));
-		if (matchingChanges.length === 0) return 'Indefinite';
-		const lastMatch = matchingChanges[matchingChanges.length - 1];
-		return lastMatch.endDate ?? 'Indefinite';
 	}
 
-	function clearShiftDragState() {
-		draggingShiftEmployeeTypeId = null;
-		dragOverShiftEmployeeTypeId = null;
-	}
+	function primaryShiftChangeForMonth(
+		shift: ShiftRow,
+		monthValue: string = shiftsWorkshopMonth
+	): ShiftChangeRow | null {
+		const matchingChanges = shiftChangesForMonth(shift, monthValue);
+		if (matchingChanges.length === 0) return null;
 
-	function handleShiftDragStart(event: DragEvent, shift: ShiftRow) {
-		if (activeSection !== 'shiftsWorkshop' || isShiftReorderLoading) return;
-		draggingShiftEmployeeTypeId = shift.employeeTypeId;
-		dragOverShiftEmployeeTypeId = null;
-		if (event.dataTransfer) {
-			event.dataTransfer.effectAllowed = 'move';
-			event.dataTransfer.setData('text/plain', String(shift.employeeTypeId));
-			const handleEl = event.currentTarget as HTMLElement | null;
-			const rowEl = handleEl?.closest('tr') as HTMLElement | null;
-			if (rowEl) {
-				event.dataTransfer.setDragImage(rowEl, 24, 16);
+		const monthStart = monthStartDate(monthValue);
+		if (!monthStart) return matchingChanges[0] ?? null;
+
+		for (let index = matchingChanges.length - 1; index >= 0; index -= 1) {
+			const change = matchingChanges[index];
+			const effectiveEnd =
+				change.endDate && isValidDate(change.endDate) ? change.endDate : '9999-12-31';
+			if (change.startDate <= monthStart && effectiveEnd >= monthStart) {
+				return change;
 			}
 		}
+
+		return matchingChanges[0] ?? null;
 	}
 
-	function handleShiftDragOver(event: DragEvent, shift: ShiftRow) {
-		if (activeSection !== 'shiftsWorkshop') return;
-		if (draggingShiftEmployeeTypeId === null) return;
-		event.preventDefault();
-		if (event.dataTransfer) {
-			event.dataTransfer.dropEffect = 'move';
+	function displayShiftEndDate(shift: ShiftRow): string {
+		if (!isWorkshopLikeShiftsSection(activeSection)) {
+			return 'Indefinite';
 		}
-		if (draggingShiftEmployeeTypeId === shift.employeeTypeId) {
-			dragOverShiftEmployeeTypeId = null;
+		const primaryChange = primaryShiftChangeForMonth(shift, shiftsWorkshopMonth);
+		return formatOptionalDateForDisplay(primaryChange?.endDate, 'Indefinite');
+	}
+
+	function shiftReorderRows(): HTMLTableRowElement[] {
+		if (!shiftsWorkshopTbodyEl) return [];
+		return Array.from(shiftsWorkshopTbodyEl.querySelectorAll('tr[data-shift-id]')).filter(
+			(row): row is HTMLTableRowElement => row instanceof HTMLTableRowElement
+		);
+	}
+
+	function shiftIdFromRow(row: HTMLTableRowElement | null): number | null {
+		if (!row) return null;
+		const raw = row.dataset.shiftId;
+		if (!raw) return null;
+		const parsed = Number(raw);
+		return Number.isInteger(parsed) ? parsed : null;
+	}
+
+	function shiftReorderBeforeId(pointerY: number): number | null {
+		if (!shiftReorderState) return null;
+		const rows = shiftReorderRows().filter(
+			(row) => shiftIdFromRow(row) !== shiftReorderState?.sourceId
+		);
+		if (rows.length === 0) return null;
+
+		const firstRect = rows[0].getBoundingClientRect();
+		if (pointerY < firstRect.top) {
+			return shiftIdFromRow(rows[0]);
+		}
+
+		for (let index = 0; index < rows.length; index += 1) {
+			const row = rows[index];
+			const rect = row.getBoundingClientRect();
+			if (pointerY <= rect.bottom) {
+				const nextRow = rows[index + 1] ?? null;
+				return shiftIdFromRow(nextRow);
+			}
+		}
+		return null;
+	}
+
+	function shiftReorderOrderedIds(sourceId: number, beforeId: number | null): number[] {
+		const orderedIds = displayedShifts
+			.map((shift) => shift.employeeTypeId)
+			.filter((id) => id !== sourceId);
+		if (beforeId === null) {
+			orderedIds.push(sourceId);
+			return orderedIds;
+		}
+		const insertIndex = orderedIds.findIndex((id) => id === beforeId);
+		if (insertIndex < 0) {
+			orderedIds.push(sourceId);
+			return orderedIds;
+		}
+		orderedIds.splice(insertIndex, 0, sourceId);
+		return orderedIds;
+	}
+
+	function shiftReorderChanged(sourceId: number, nextOrderedIds: number[]): boolean {
+		const currentOrderedIds = displayedShifts.map((shift) => shift.employeeTypeId);
+		if (currentOrderedIds.length !== nextOrderedIds.length) return false;
+		const sourceIndex = currentOrderedIds.findIndex((id) => id === sourceId);
+		const nextIndex = nextOrderedIds.findIndex((id) => id === sourceId);
+		return sourceIndex !== nextIndex;
+	}
+
+	function workshopShiftsForMonth(shifts: ShiftRow[], monthValue: string): ShiftRow[] {
+		return shifts
+			.filter((shift) => {
+				const effectiveChanges =
+					shift.changes && shift.changes.length > 0
+						? shift.changes
+						: [
+								{
+									startDate: shift.startDate,
+									endDate: null,
+									name: shift.name,
+									patternId: shift.patternId,
+									pattern: shift.pattern
+								} satisfies ShiftChangeRow
+							];
+				return effectiveChanges.some((change) => shiftChangeOverlapsMonth(change, monthValue));
+			})
+			.sort((a, b) => {
+				const orderDiff =
+					shiftSortOrderForMonth(a, monthValue) - shiftSortOrderForMonth(b, monthValue);
+				if (orderDiff !== 0) return orderDiff;
+				const nameDiff = a.name.localeCompare(b.name);
+				if (nameDiff !== 0) return nameDiff;
+				return a.employeeTypeId - b.employeeTypeId;
+			});
+	}
+
+	function applyOptimisticWorkshopOrder(shifts: ShiftRow[], monthValue: string): ShiftRow[] {
+		if (
+			!shiftReorderOptimisticOrder ||
+			shiftReorderOptimisticOrder.month !== monthValue ||
+			shiftReorderOptimisticOrder.orderedIds.length === 0
+		) {
+			return shifts;
+		}
+		const indexById = new Map(
+			shiftReorderOptimisticOrder.orderedIds.map((id, index) => [id, index] as const)
+		);
+		return [...shifts].sort((a, b) => {
+			const aIndex = indexById.get(a.employeeTypeId);
+			const bIndex = indexById.get(b.employeeTypeId);
+			const missingIndex = Number.MAX_SAFE_INTEGER;
+			if ((aIndex ?? missingIndex) !== (bIndex ?? missingIndex)) {
+				return (aIndex ?? missingIndex) - (bIndex ?? missingIndex);
+			}
+			const baseOrderDiff =
+				shiftSortOrderForMonth(a, monthValue) - shiftSortOrderForMonth(b, monthValue);
+			if (baseOrderDiff !== 0) return baseOrderDiff;
+			return a.employeeTypeId - b.employeeTypeId;
+		});
+	}
+
+	function normalizeShiftRows(rows: unknown): ShiftRow[] {
+		if (!Array.isArray(rows)) return [];
+		return rows.map((shift, index) => {
+			const candidate = shift as ShiftRow;
+			return {
+				...candidate,
+				sortOrder: Number(candidate.sortOrder ?? index + 1),
+				endDate: candidate.endDate ?? null
+			};
+		});
+	}
+
+	function arraysEqualNumber(left: number[], right: number[]): boolean {
+		if (left.length !== right.length) return false;
+		for (let index = 0; index < left.length; index += 1) {
+			if (left[index] !== right[index]) return false;
+		}
+		return true;
+	}
+
+	async function fetchTeamShiftsSnapshot(
+		monthValue: string | null = null
+	): Promise<ShiftRow[] | null> {
+		const monthQuery = monthValue ? `?month=${encodeURIComponent(monthValue)}` : '';
+		const result = await fetchWithAuthRedirect(`${base}/api/team/shifts${monthQuery}`, {
+			method: 'GET'
+		});
+		if (!result) return null;
+		if (!result.ok) {
+			throw new Error(await parseErrorMessage(result, 'Failed to load shifts'));
+		}
+		const data = await result.json();
+		return normalizeShiftRows(data.shifts);
+	}
+
+	async function reconcileShiftReorderWithServer(
+		expectedOrderedIds: number[],
+		monthValue: string
+	): Promise<void> {
+		let serverShifts: ShiftRow[] | null = null;
+		try {
+			serverShifts = await fetchTeamShiftsSnapshot(monthValue);
+		} catch {
 			return;
 		}
-		dragOverShiftEmployeeTypeId = shift.employeeTypeId;
-	}
-
-	function handleShiftDragLeave(shift: ShiftRow) {
-		if (dragOverShiftEmployeeTypeId === shift.employeeTypeId) {
-			dragOverShiftEmployeeTypeId = null;
+		if (!serverShifts) return;
+		const serverIds = workshopShiftsForMonth(serverShifts, monthValue).map(
+			(shift) => shift.employeeTypeId
+		);
+		if (arraysEqualNumber(serverIds, expectedOrderedIds)) {
+			return;
 		}
+		teamShifts = serverShifts;
+		expandedShiftRows = new Set();
+		shiftReorderOptimisticOrder = null;
 	}
 
-	async function handleShiftDrop(event: DragEvent, targetShift: ShiftRow) {
-		if (activeSection !== 'shiftsWorkshop') return;
-		event.preventDefault();
-		const sourceId = draggingShiftEmployeeTypeId;
-		const targetId = targetShift.employeeTypeId;
-		clearShiftDragState();
-		if (sourceId === null || sourceId === targetId || isShiftReorderLoading) return;
-
+	async function saveShiftReorder(sourceId: number, nextOrderedIds: number[]): Promise<void> {
+		if (!shiftReorderChanged(sourceId, nextOrderedIds)) return;
 		const sourceShift = displayedShifts.find((shift) => shift.employeeTypeId === sourceId);
-		const destinationShift = displayedShifts.find((shift) => shift.employeeTypeId === targetId);
-		if (!sourceShift || !destinationShift) return;
-		const currentIds = displayedShifts.map((shift) => shift.employeeTypeId);
-		const sourceIndex = currentIds.findIndex((id) => id === sourceId);
-		const targetIndex = currentIds.findIndex((id) => id === targetId);
-		if (sourceIndex < 0 || targetIndex < 0 || sourceIndex === targetIndex) return;
-		const [moved] = currentIds.splice(sourceIndex, 1);
-		currentIds.splice(targetIndex, 0, moved);
-
+		if (!sourceShift) return;
 		const effectiveStartDate = monthStartDate(shiftsWorkshopMonth);
 		if (!effectiveStartDate) {
 			addShiftActionError = 'Selected month is invalid.';
 			return;
 		}
-
+		const reorderMonth = shiftsWorkshopMonth;
+		const previousOptimisticOrder = shiftReorderOptimisticOrder;
+		shiftReorderOptimisticOrder = { month: reorderMonth, orderedIds: [...nextOrderedIds] };
 		isShiftReorderLoading = true;
 		addShiftActionError = '';
 		try {
@@ -636,19 +889,206 @@
 					reorderOnly: true,
 					employeeTypeId: sourceShift.employeeTypeId,
 					startDate: effectiveStartDate,
-					orderedEmployeeTypeIds: currentIds
+					orderedEmployeeTypeIds: nextOrderedIds
 				})
 			});
-			if (!result) return;
+			if (!result) {
+				shiftReorderOptimisticOrder = previousOptimisticOrder;
+				return;
+			}
 			if (!result.ok) {
 				throw new Error(await parseErrorMessage(result, 'Failed to reorder shift'));
 			}
-			await refreshDependenciesAfterMutation(['shifts', 'assignments', 'schedule']);
+			await reconcileShiftReorderWithServer(nextOrderedIds, reorderMonth);
+			void refreshDependenciesAfterMutation(['assignments', 'schedule']).catch(() => {
+				// Reorder save is already committed; keep background refresh best-effort.
+			});
 		} catch (error) {
+			shiftReorderOptimisticOrder = previousOptimisticOrder;
 			addShiftActionError = error instanceof Error ? error.message : 'Failed to reorder shift';
 		} finally {
 			isShiftReorderLoading = false;
 		}
+	}
+
+	function stopShiftReorderListeners() {
+		if (typeof window === 'undefined') return;
+		window.removeEventListener('mousemove', handleShiftReorderMouseMove);
+		window.removeEventListener('mouseup', handleShiftReorderMouseUp);
+		logShiftReorderDebug('Detached global mouse listeners');
+	}
+
+	function startShiftReorderListeners() {
+		if (typeof window === 'undefined') return;
+		window.addEventListener('mousemove', handleShiftReorderMouseMove);
+		window.addEventListener('mouseup', handleShiftReorderMouseUp);
+		logShiftReorderDebug('Attached global mouse listeners');
+	}
+
+	function handleShiftReorderMouseMove(event: MouseEvent) {
+		if (!shiftReorderState) return;
+		event.preventDefault();
+		const { offsetX, offsetY } = shiftReorderState;
+		const x = event.clientX - offsetX;
+		const y = event.clientY - offsetY;
+		const nextBeforeId = shiftReorderBeforeId(event.clientY);
+		shiftReorderState = {
+			...shiftReorderState,
+			currentBeforeId: nextBeforeId,
+			ghostX: x,
+			ghostY: y
+		};
+		applyShiftReorderGhostPosition(x, y, shiftReorderState.ghostWidth);
+		const now = Date.now();
+		if (now - shiftReorderLastMoveLogAt >= 120) {
+			shiftReorderMoveLogCount += 1;
+			shiftReorderLastMoveLogAt = now;
+			logShiftReorderDebug('mousemove', {
+				count: shiftReorderMoveLogCount,
+				clientX: event.clientX,
+				clientY: event.clientY,
+				ghostX: Math.round(x),
+				ghostY: Math.round(y),
+				currentBeforeId: nextBeforeId,
+				sourceId: shiftReorderState.sourceId
+			});
+		}
+	}
+
+	async function stopShiftReorder(commit: boolean) {
+		if (!shiftReorderState) return;
+		const state = shiftReorderState;
+		logShiftReorderDebug('Stopping drag', {
+			commit,
+			sourceId: state.sourceId,
+			currentBeforeId: state.currentBeforeId,
+			isShiftReorderLoading
+		});
+		shiftReorderState = null;
+		stopShiftReorderListeners();
+		document.body.classList.remove('teamShiftRowDragging');
+		state.handle.blur();
+		if (!commit || isShiftReorderLoading) return;
+		const nextOrderedIds = shiftReorderOrderedIds(state.sourceId, state.currentBeforeId);
+		logShiftReorderDebug('Computed next order', {
+			sourceId: state.sourceId,
+			nextOrderedIds
+		});
+		await saveShiftReorder(state.sourceId, nextOrderedIds);
+	}
+
+	function handleShiftReorderMouseUp(event: MouseEvent) {
+		if (!shiftReorderState) return;
+		event.preventDefault();
+		logShiftReorderDebug('mouseup', {
+			clientX: event.clientX,
+			clientY: event.clientY,
+			sourceId: shiftReorderState.sourceId
+		});
+		void stopShiftReorder(true);
+	}
+
+	function handleShiftReorderMouseDown(event: MouseEvent, shift: ShiftRow) {
+		logShiftReorderDebug('mousedown', {
+			shiftId: shift.employeeTypeId,
+			activeSection,
+			shiftsViewMode,
+			isShiftReorderLoading,
+			hasTbody: Boolean(shiftsWorkshopTbodyEl),
+			button: event.button,
+			clientX: event.clientX,
+			clientY: event.clientY
+		});
+		if (activeSection !== 'shifts' || isShiftReorderLoading || !shiftsWorkshopTbodyEl) return;
+		if (event.button !== 0) return;
+		const handle = event.currentTarget as HTMLButtonElement | null;
+		const row = handle?.closest('tr[data-shift-id]') as HTMLTableRowElement | null;
+		if (!handle || !row) return;
+		event.preventDefault();
+		if (shiftReorderState) return;
+		shiftReorderMoveLogCount = 0;
+		shiftReorderLastMoveLogAt = 0;
+		startShiftReorderListeners();
+		const rowRect = row.getBoundingClientRect();
+		logShiftReorderDebug('Row bounds captured', {
+			shiftId: shift.employeeTypeId,
+			rowLeft: Math.round(rowRect.left),
+			rowTop: Math.round(rowRect.top),
+			rowWidth: Math.round(rowRect.width),
+			rowHeight: Math.round(rowRect.height)
+		});
+		const orderedIds = shiftReorderRows()
+			.map((tableRow) => shiftIdFromRow(tableRow))
+			.filter((id): id is number => id !== null);
+		const sourceIndex = orderedIds.findIndex((id) => id === shift.employeeTypeId);
+		const initialBeforeId = sourceIndex >= 0 ? (orderedIds[sourceIndex + 1] ?? null) : null;
+		document.body.classList.add('teamShiftRowDragging');
+		shiftReorderState = {
+			sourceId: shift.employeeTypeId,
+			handle,
+			offsetX: event.clientX - rowRect.left,
+			offsetY: event.clientY - rowRect.top,
+			currentBeforeId: initialBeforeId,
+			ghostX: rowRect.left,
+			ghostY: rowRect.top,
+			ghostWidth:
+				Math.round(shiftsWorkshopTableEl?.getBoundingClientRect().width ?? rowRect.width) ||
+				rowRect.width,
+			rowHeight: rowRect.height
+		};
+		applyShiftReorderGhostPosition(
+			rowRect.left,
+			rowRect.top,
+			Math.round(shiftsWorkshopTableEl?.getBoundingClientRect().width ?? rowRect.width) ||
+				rowRect.width
+		);
+		logShiftReorderDebug('Drag state initialized', {
+			sourceId: shift.employeeTypeId,
+			initialBeforeId
+		});
+	}
+
+	function showShiftPlaceholderBefore(shiftId: number): boolean {
+		return (
+			activeSection === 'shifts' &&
+			shiftReorderState !== null &&
+			shiftReorderState.currentBeforeId === shiftId
+		);
+	}
+
+	function showShiftPlaceholderAtEnd(): boolean {
+		return (
+			activeSection === 'shifts' &&
+			shiftReorderState !== null &&
+			shiftReorderState.currentBeforeId === null
+		);
+	}
+
+	function shiftReorderGhostStyle(): string {
+		if (!shiftReorderState) return '';
+		return `width:${Math.round(shiftReorderState.ghostWidth)}px;transform:translate(${Math.round(
+			shiftReorderState.ghostX
+		)}px, ${Math.round(shiftReorderState.ghostY)}px) rotate(0.3deg) scale(1.008);`;
+	}
+
+	function portalToBody(node: HTMLElement) {
+		if (typeof document === 'undefined') return;
+		logShiftReorderDebug('Mounting ghost into document.body');
+		document.body.appendChild(node);
+		const state = shiftReorderState;
+		if (node instanceof HTMLDivElement && state) {
+			shiftReorderGhostEl = node;
+			applyShiftReorderGhostPosition(state.ghostX, state.ghostY, state.ghostWidth);
+		}
+		return {
+			destroy() {
+				logShiftReorderDebug('Unmounting ghost from document.body');
+				if (shiftReorderGhostEl === node) {
+					shiftReorderGhostEl = null;
+				}
+				node.remove();
+			}
+		};
 	}
 
 	async function handleAddShift() {
@@ -659,6 +1099,7 @@
 		const sortOrder = Number(addShiftSortOrder);
 		const maxSortOrder = teamShifts.length + 1;
 		const startDate = addShiftStartDate.trim();
+		const endDate = addShiftEndDate.trim();
 		const patternId = addShiftPatternId.trim();
 
 		if (!name) {
@@ -667,6 +1108,14 @@
 		}
 		if (!isValidDate(startDate)) {
 			addShiftActionError = 'Start date must be in YYYY-MM-DD format.';
+			return;
+		}
+		if (endDate && !isValidDate(endDate)) {
+			addShiftActionError = 'End date must be in YYYY-MM-DD format.';
+			return;
+		}
+		if (endDate && endDate < startDate) {
+			addShiftActionError = 'End date must be on or after start date.';
 			return;
 		}
 		if (!Number.isInteger(sortOrder) || sortOrder < 1 || sortOrder > maxSortOrder) {
@@ -683,7 +1132,8 @@
 					name,
 					sortOrder,
 					patternId: patternId ? Number(patternId) : null,
-					startDate
+					startDate,
+					endDate: endDate || null
 				})
 			});
 			if (!result) return;
@@ -707,6 +1157,7 @@
 		const sortOrder = Number(addShiftSortOrder);
 		const maxSortOrder = Math.max(teamShifts.length, 1);
 		const startDate = addShiftStartDate.trim();
+		const endDate = addShiftEndDate.trim();
 		const patternId = addShiftPatternId.trim();
 
 		if (!name) {
@@ -715,6 +1166,14 @@
 		}
 		if (!isValidDate(startDate)) {
 			addShiftActionError = 'Change effective date must be in YYYY-MM-DD format.';
+			return;
+		}
+		if (endDate && !isValidDate(endDate)) {
+			addShiftActionError = 'End date must be in YYYY-MM-DD format.';
+			return;
+		}
+		if (endDate && endDate < startDate) {
+			addShiftActionError = 'End date must be on or after change effective date.';
 			return;
 		}
 		if (!Number.isInteger(sortOrder) || sortOrder < 1 || sortOrder > maxSortOrder) {
@@ -733,6 +1192,7 @@
 					sortOrder,
 					patternId: patternId ? Number(patternId) : null,
 					startDate,
+					endDate: endDate || null,
 					editMode: isEditingShiftHistoryEntry ? 'history' : 'timeline',
 					changeStartDate: isEditingShiftHistoryEntry ? editingShiftHistoryStartDate : null
 				})
@@ -780,14 +1240,11 @@
 					}
 				}
 
-				if (apiError.code === 'SHIFT_ACTIVE_ASSIGNMENTS') {
-					const activeCount = Number(apiError.activeAssignmentCount ?? 0);
-					const message =
-						activeCount > 0
-							? `This shift is currently assigned to ${activeCount} active ${
-									activeCount === 1 ? 'assignment' : 'assignments'
-								}. If you continue, active assignments will end effective today and future assignments will be removed. Continue?`
-							: 'This shift is currently assigned to active users. If you continue, active assignments will end effective today and future assignments will be removed. Continue?';
+				if (apiError.code === 'SHIFT_IN_USE_CONFIRMATION') {
+					const assignmentCount = Number(apiError.assignmentCount ?? 0);
+					const shiftEventCount = Number(apiError.shiftEventCount ?? 0);
+					const shiftChangeCount = Number(apiError.shiftChangeCount ?? 0);
+					const message = `This shift has historical usage and will be permanently deleted along with related records.\n\nAssignments: ${assignmentCount}\nShift events: ${shiftEventCount}\nShift changes: ${shiftChangeCount}\n\nContinue?`;
 					if (!window.confirm(message)) {
 						addShiftActionError = 'Shift removal canceled.';
 						return;
@@ -798,7 +1255,7 @@
 						headers: { 'content-type': 'application/json' },
 						body: JSON.stringify({
 							...removePayloadBase,
-							confirmActiveAssignmentRemoval: true
+							confirmUsedShiftRemoval: true
 						})
 					});
 					if (!result) return;
@@ -830,6 +1287,59 @@
 		return value.trim();
 	}
 
+	function createDefaultEventCodeReminderDraft(): EventCodeReminderDraft {
+		return {
+			id: nextEventCodeReminderDraftId++,
+			amount: 1,
+			unit: 'days',
+			hour: 12,
+			meridiem: 'PM'
+		};
+	}
+
+	function resetEventCodeReminderDrafts() {
+		addEventCodeReminderImmediate = false;
+		addEventCodeReminderScheduled = false;
+		eventCodeReminderDrafts = [createDefaultEventCodeReminderDraft()];
+	}
+
+	function addEventCodeReminderDraft() {
+		if (eventCodeReminderDrafts.length >= EVENT_CODE_MAX_REMINDERS) return;
+		eventCodeReminderDrafts = [...eventCodeReminderDrafts, createDefaultEventCodeReminderDraft()];
+	}
+
+	function removeEventCodeReminderDraft(id: number) {
+		if (eventCodeReminderDrafts.length <= 1) {
+			addEventCodeReminderScheduled = false;
+			eventCodeReminderDrafts = [createDefaultEventCodeReminderDraft()];
+			return;
+		}
+		eventCodeReminderDrafts = eventCodeReminderDrafts.filter((draft) => draft.id !== id);
+	}
+
+	function updateEventCodeReminderDraft(
+		id: number,
+		field: 'amount' | 'unit' | 'hour' | 'meridiem',
+		nextValue: string | number
+	) {
+		eventCodeReminderDrafts = eventCodeReminderDrafts.map((draft) => {
+			if (draft.id !== id) return draft;
+			if (field === 'amount') return { ...draft, amount: Number(nextValue) };
+			if (field === 'hour') return { ...draft, hour: Number(nextValue) };
+			if (field === 'unit') return { ...draft, unit: String(nextValue) };
+			return { ...draft, meridiem: String(nextValue) };
+		});
+	}
+
+	function eventCodeReminderSummaryKey(reminderDraft: EventCodeReminderDraft): string {
+		return `${reminderDraft.amount}|${reminderDraft.unit}|${reminderDraft.hour}|${reminderDraft.meridiem}`;
+	}
+
+	function eventCodeReminderUnitLabel(unit: string, amount: number): string {
+		if (amount === 1 && unit.endsWith('s')) return unit.slice(0, -1);
+		return unit;
+	}
+
 	function resetEventCodesPane() {
 		eventCodesViewMode = 'list';
 		selectedEventCodeForEdit = null;
@@ -838,6 +1348,7 @@
 		addEventCodeDisplayMode = 'Schedule Overlay';
 		addEventCodeColor = '#22c55e';
 		addEventCodeIsActive = true;
+		resetEventCodeReminderDrafts();
 		eventCodeDisplayModePickerOpen = false;
 		eventCodeActionError = '';
 		eventCodeActionLoading = false;
@@ -851,6 +1362,7 @@
 		addEventCodeDisplayMode = 'Schedule Overlay';
 		addEventCodeColor = '#22c55e';
 		addEventCodeIsActive = true;
+		resetEventCodeReminderDrafts();
 		eventCodeDisplayModePickerOpen = false;
 		eventCodeActionError = '';
 		eventCodeActionLoading = false;
@@ -864,6 +1376,23 @@
 		addEventCodeDisplayMode = eventCode.displayMode;
 		addEventCodeColor = eventCode.color;
 		addEventCodeIsActive = eventCode.isActive;
+		addEventCodeReminderImmediate = Boolean(eventCode.notifyImmediately);
+		const reminders = Array.isArray(eventCode.scheduledReminders)
+			? eventCode.scheduledReminders
+			: [];
+		if (reminders.length > 0) {
+			addEventCodeReminderScheduled = true;
+			eventCodeReminderDrafts = reminders.map((reminder) => ({
+				id: nextEventCodeReminderDraftId++,
+				amount: reminder.amount,
+				unit: reminder.unit,
+				hour: reminder.hour,
+				meridiem: reminder.meridiem
+			}));
+		} else {
+			addEventCodeReminderScheduled = false;
+			eventCodeReminderDrafts = [createDefaultEventCodeReminderDraft()];
+		}
 		eventCodeDisplayModePickerOpen = false;
 		eventCodeActionError = '';
 		eventCodeActionLoading = false;
@@ -948,7 +1477,16 @@
 				name,
 				displayMode: addEventCodeDisplayMode,
 				color: addEventCodeColor,
-				isActive: addEventCodeIsActive
+				isActive: addEventCodeIsActive,
+				notifyImmediately: addEventCodeReminderImmediate,
+				scheduledReminders: addEventCodeReminderScheduled
+					? eventCodeReminderDrafts.map((reminderDraft) => ({
+							amount: reminderDraft.amount,
+							unit: reminderDraft.unit,
+							hour: reminderDraft.hour,
+							meridiem: reminderDraft.meridiem
+						}))
+					: []
 			};
 			const result = await fetchWithAuthRedirect(`${base}/api/team/event-codes`, {
 				method: isEdit ? 'PATCH' : 'POST',
@@ -2086,6 +2624,11 @@
 	}
 
 	function toggleShiftDetails(employeeTypeId: number) {
+		console.log('[TeamSetupModal] toggleShiftDetails called', {
+			employeeTypeId,
+			wasExpanded: expandedShiftRows.has(employeeTypeId),
+			sizeBefore: expandedShiftRows.size
+		});
 		const next = new Set(expandedShiftRows);
 		if (next.has(employeeTypeId)) {
 			next.delete(employeeTypeId);
@@ -2093,6 +2636,11 @@
 			next.add(employeeTypeId);
 		}
 		expandedShiftRows = next;
+		console.log('[TeamSetupModal] toggleShiftDetails applied', {
+			employeeTypeId,
+			isExpandedNow: expandedShiftRows.has(employeeTypeId),
+			sizeAfter: expandedShiftRows.size
+		});
 	}
 
 	function toggleAssignmentDetails(assignmentId: string) {
@@ -2106,7 +2654,7 @@
 	}
 
 	function hasShiftHistoryChanges(shift: ShiftRow): boolean {
-		return (shift.changes?.length ?? 0) > 1;
+		return shiftChangesForMonth(shift, shiftsWorkshopMonth).length > 1;
 	}
 
 	function hasAssignmentHistoryChanges(assignment: AssignmentRow): boolean {
@@ -2329,18 +2877,9 @@
 		teamShiftsLoading = true;
 		teamShiftsError = '';
 		try {
-			const result = await fetchWithAuthRedirect(`${base}/api/team/shifts`, { method: 'GET' });
-			if (!result) return;
-			if (!result.ok) {
-				throw new Error(await parseErrorMessage(result, 'Failed to load shifts'));
-			}
-			const data = await result.json();
-			teamShifts = Array.isArray(data.shifts)
-				? data.shifts.map((shift: ShiftRow, index: number) => ({
-						...shift,
-						sortOrder: Number(shift.sortOrder ?? index + 1)
-					}))
-				: [];
+			const shifts = await fetchTeamShiftsSnapshot(shiftsWorkshopMonth);
+			if (!shifts) return;
+			teamShifts = shifts;
 			expandedShiftRows = new Set();
 		} catch (error) {
 			teamShiftsError = error instanceof Error ? error.message : 'Failed to load shifts';
@@ -2666,6 +3205,40 @@
 		thumbTopPx = clamp(nextThumbTop, 0, maxThumbTop);
 	}
 
+	function teardownModalOverflowObservers() {
+		modalResizeObserver?.disconnect();
+		modalResizeObserver = null;
+		modalMutationObserver?.disconnect();
+		modalMutationObserver = null;
+	}
+
+	function setupModalOverflowObservers() {
+		teardownModalOverflowObservers();
+		if (!open || !modalScrollEl) return;
+
+		const syncScrollbar = () => {
+			updateCustomScrollbar();
+			requestAnimationFrame(updateCustomScrollbar);
+		};
+
+		if (typeof ResizeObserver !== 'undefined') {
+			modalResizeObserver = new ResizeObserver(syncScrollbar);
+			modalResizeObserver.observe(modalScrollEl);
+			if (modalBodyEl) {
+				modalResizeObserver.observe(modalBodyEl);
+			}
+		}
+
+		if (typeof MutationObserver !== 'undefined') {
+			modalMutationObserver = new MutationObserver(syncScrollbar);
+			modalMutationObserver.observe(modalScrollEl, {
+				childList: true,
+				subtree: true,
+				characterData: true
+			});
+		}
+	}
+
 	function onModalScroll() {
 		if (!isDraggingScrollbar) {
 			updateCustomScrollbar();
@@ -2769,34 +3342,30 @@
 				}))
 				.sort((a, b) => a.startDate.localeCompare(b.startDate))
 		}));
-	$: displayedShifts =
-		activeSection === 'shiftsWorkshop'
-			? sortedShifts.filter((shift) => {
-					const effectiveChanges =
-						shift.changes && shift.changes.length > 0
-							? shift.changes
-							: [
-									{
-										startDate: shift.startDate,
-										endDate: null,
-										name: shift.name,
-										patternId: shift.patternId,
-										pattern: shift.pattern
-									} satisfies ShiftChangeRow
-								];
-					return effectiveChanges.some((change) =>
-						shiftChangeOverlapsMonth(change, shiftsWorkshopMonth)
-					);
-				}).sort((a, b) => {
-					const orderDiff =
-						shiftSortOrderForMonth(a, shiftsWorkshopMonth) -
-						shiftSortOrderForMonth(b, shiftsWorkshopMonth);
-					if (orderDiff !== 0) return orderDiff;
-					const nameDiff = a.name.localeCompare(b.name);
-					if (nameDiff !== 0) return nameDiff;
-					return a.employeeTypeId - b.employeeTypeId;
-				})
-			: sortedShifts;
+	$: displayedShifts = isWorkshopLikeShiftsSection(activeSection)
+		? applyOptimisticWorkshopOrder(
+				workshopShiftsForMonth(sortedShifts, shiftsWorkshopMonth),
+				shiftsWorkshopMonth
+			)
+		: sortedShifts;
+	$: {
+		const activeReorder = shiftReorderState;
+		shiftReorderGhostShift = activeReorder
+			? (displayedShifts.find((shift) => shift.employeeTypeId === activeReorder.sourceId) ?? null)
+			: null;
+	}
+	$: {
+		const nextGhostRenderState = Boolean(shiftReorderState && shiftReorderGhostShift);
+		if (nextGhostRenderState !== lastGhostRenderState) {
+			lastGhostRenderState = nextGhostRenderState;
+			logShiftReorderDebug('Ghost render state changed', {
+				isVisible: nextGhostRenderState,
+				hasState: Boolean(shiftReorderState),
+				hasGhostShift: Boolean(shiftReorderGhostShift),
+				sourceId: shiftReorderState?.sourceId ?? null
+			});
+		}
+	}
 	$: sortedEventCodes = [...eventCodeRows].sort((a, b) => {
 		const aValue = toComparableEventCodeValue(a, eventCodeSortKey);
 		const bValue = toComparableEventCodeValue(b, eventCodeSortKey);
@@ -2811,6 +3380,26 @@
 	$: selectedEventCodeDisplayModeLabel =
 		eventCodeDisplayModeItems.find((item) => item.value === addEventCodeDisplayMode)?.label ??
 		'Schedule Overlay';
+	$: canAddEventCodeReminderDraft = eventCodeReminderDrafts.length < EVENT_CODE_MAX_REMINDERS;
+	$: if (addEventCodeReminderScheduled && eventCodeReminderDrafts.length === 0) {
+		eventCodeReminderDrafts = [createDefaultEventCodeReminderDraft()];
+	}
+	$: eventCodeReminderSummaryLines = (() => {
+		if (!addEventCodeReminderScheduled) return [] as string[];
+		const seenReminderKeys = new Set<string>();
+		const lines: string[] = [];
+		for (const reminderDraft of eventCodeReminderDrafts) {
+			const key = eventCodeReminderSummaryKey(reminderDraft);
+			if (seenReminderKeys.has(key)) continue;
+			seenReminderKeys.add(key);
+			const unitLabel = eventCodeReminderUnitLabel(reminderDraft.unit, reminderDraft.amount);
+			lines.push(
+				`${reminderDraft.hour} ${reminderDraft.meridiem} ${reminderDraft.amount} ${unitLabel} before the event`
+			);
+		}
+		return lines;
+	})();
+	$: eventCodeReminderSummaryTitle = `${eventCodeReminderSummaryLines.length} Scheduled Reminder${eventCodeReminderSummaryLines.length === 1 ? '' : 's'}`;
 	$: shiftPatternItems = [
 		{ value: '', label: 'Unassigned' },
 		...patterns.map((pattern) => ({ value: String(pattern.patternId), label: pattern.name }))
@@ -2893,11 +3482,7 @@
 		assignmentListShiftFilter = '';
 	}
 
-	$: if (
-		open &&
-		(activeSection === 'assignments' || activeSection === 'assignmentsWorkshop') &&
-		assignmentsViewMode !== 'list'
-	) {
+	$: if (open && activeSection === 'assignments' && assignmentsViewMode !== 'list') {
 		const bounded = adjustNumericInput(
 			assignmentSortOrder,
 			0,
@@ -2911,7 +3496,7 @@
 
 	$: if (
 		open &&
-		(activeSection === 'assignments' || activeSection === 'assignmentsWorkshop') &&
+		activeSection === 'assignments' &&
 		assignmentsViewMode === 'add' &&
 		!assignmentSortOrderManuallySet &&
 		selectedAssignmentShiftId() !== null &&
@@ -2982,10 +3567,7 @@
 	}
 
 	$: {
-		const isShiftsListVisible =
-			open &&
-			(activeSection === 'shifts' || activeSection === 'shiftsWorkshop') &&
-			shiftsViewMode === 'list';
+		const isShiftsListVisible = open && activeSection === 'shifts' && shiftsViewMode === 'list';
 		if (isShiftsListVisible && !wasShiftsListVisible) {
 			void loadTeamShifts();
 			if (!patterns.length && !patternsLoading) {
@@ -3022,9 +3604,7 @@
 
 	$: {
 		const isAssignmentsListVisible =
-			open &&
-			(activeSection === 'assignments' || activeSection === 'assignmentsWorkshop') &&
-			assignmentsViewMode === 'list';
+			open && activeSection === 'assignments' && assignmentsViewMode === 'list';
 		if (isAssignmentsListVisible && !wasAssignmentsListVisible) {
 			void loadTeamUsers();
 			void loadTeamShifts();
@@ -3057,6 +3637,13 @@
 		});
 	}
 
+	$: if (open && modalScrollEl) {
+		modalBodyEl;
+		setupModalOverflowObservers();
+	} else {
+		teardownModalOverflowObservers();
+	}
+
 	$: if (showAddUserResults && open && activeSection === 'users' && usersViewMode === 'add') {
 		addUsers.length;
 		addUsersLoading;
@@ -3067,11 +3654,7 @@
 		});
 	}
 
-	$: if (
-		assignmentUserResultsOpen &&
-		open &&
-		(activeSection === 'assignments' || activeSection === 'assignmentsWorkshop')
-	) {
+	$: if (assignmentUserResultsOpen && open && activeSection === 'assignments') {
 		assignmentUserOptions.length;
 		tick().then(() => {
 			updateAssignmentUserResultsScrollbar();
@@ -3080,18 +3663,29 @@
 	}
 
 	$: if (!open) {
+		void stopShiftReorder(false);
 		stopDragging();
+		teardownModalOverflowObservers();
 		stopAddUserResultsDragging();
 		stopAssignmentUserResultsDragging();
 		resetAddUserResultsScrollbarState();
 		resetAssignmentUserResultsScrollbarState();
 	}
 
+	$: if (
+		shiftReorderState &&
+		(!isWorkshopLikeShiftsSection(activeSection) || shiftsViewMode !== 'list')
+	) {
+		void stopShiftReorder(false);
+	}
+
 	onDestroy(() => {
 		if (addUserSearchTimer) {
 			clearTimeout(addUserSearchTimer);
 		}
+		void stopShiftReorder(false);
 		stopDragging();
+		teardownModalOverflowObservers();
 		stopAddUserResultsDragging();
 		stopAssignmentUserResultsDragging();
 		if (typeof document !== 'undefined') {
@@ -3131,7 +3725,7 @@
 					<button class="btn" type="button" on:click={closeModal}>Close</button>
 				</header>
 
-				<div class="teamSetupBody">
+				<div class="teamSetupBody" bind:this={modalBodyEl}>
 					<nav class="teamSetupNav" aria-label="Team setup sections">
 						{#each sections as section}
 							<button
@@ -3487,10 +4081,10 @@
 									</div>
 								{/if}
 							</section>
-						{:else if activeSection === 'shifts' || activeSection === 'shiftsWorkshop'}
+						{:else if activeSection === 'shifts'}
 							<section class="setupSection">
 								<div class="usersPaneHeader">
-									<h3>{activeSection === 'shiftsWorkshop' ? 'Shifts Workshop' : 'Shifts'}</h3>
+									<h3>Shifts</h3>
 									{#if shiftsViewMode === 'list'}
 										<button
 											type="button"
@@ -3507,7 +4101,7 @@
 								</div>
 								{#if shiftsViewMode === 'list'}
 									<div class="setupCard">
-										{#if activeSection === 'shiftsWorkshop'}
+										{#if isWorkshopLikeShiftsSection(activeSection)}
 											<div class="workshopMonthPickerRow">
 												<div class="setupField workshopMonthPickerField">
 													<span class="setupFieldLabel">Month</span>
@@ -3519,7 +4113,7 @@
 														value={shiftsWorkshopMonth}
 														open={shiftsWorkshopMonthPickerOpen}
 														onOpenChange={setShiftsWorkshopMonthPickerOpen}
-														on:change={(event) => (shiftsWorkshopMonth = event.detail)}
+														on:change={(event) => handleShiftsWorkshopMonthChange(event.detail)}
 													/>
 												</div>
 											</div>
@@ -3530,239 +4124,275 @@
 											<div class="setupActionAlert" role="alert">{teamShiftsError}</div>
 										{:else if displayedShifts.length === 0}
 											<p>
-												{activeSection === 'shiftsWorkshop'
+												{isWorkshopLikeShiftsSection(activeSection)
 													? 'No shifts active in the selected month.'
 													: 'No shifts yet.'}
 											</p>
 										{:else}
-											<HorizontalScrollArea>
-												<table class="setupTable">
-													<thead>
-														<tr>
-															{#if activeSection !== 'shiftsWorkshop'}
-																<th aria-sort={ariaSortForShift('order')}>
-																	<button
-																		type="button"
-																		class="tableSortBtn"
-																		on:click={() => toggleShiftSort('order')}
-																	>
-																		Order
-																		<span
-																			class={`sortIndicator${shiftSortKey === 'order' ? ' active' : ''}`}
-																			aria-hidden="true"
-																		>
-																			{shiftSortKey === 'order'
-																				? shiftSortDirection === 'asc'
-																					? '↑'
-																					: '↓'
-																				: '↕'}
-																		</span>
-																	</button>
-																</th>
-															{/if}
-															{#if activeSection === 'shiftsWorkshop'}
-																<th class="shiftHandleColHead">
-																	<span class="srOnly">Reorder</span>
-																</th>
-																<th>Shift</th>
-																<th>Pattern</th>
-																<th>Start Date</th>
-															{:else}
-																<th aria-sort={ariaSortForShift('name')}>
-																	<button
-																		type="button"
-																		class="tableSortBtn"
-																		on:click={() => toggleShiftSort('name')}
-																	>
-																		Shift
-																		<span
-																			class={`sortIndicator${shiftSortKey === 'name' ? ' active' : ''}`}
-																			aria-hidden="true"
-																		>
-																			{shiftSortKey === 'name'
-																				? shiftSortDirection === 'asc'
-																					? '↑'
-																					: '↓'
-																				: '↕'}
-																		</span>
-																	</button>
-																</th>
-																<th aria-sort={ariaSortForShift('pattern')}>
-																	<button
-																		type="button"
-																		class="tableSortBtn"
-																		on:click={() => toggleShiftSort('pattern')}
-																	>
-																		Pattern
-																		<span
-																			class={`sortIndicator${shiftSortKey === 'pattern' ? ' active' : ''}`}
-																			aria-hidden="true"
-																		>
-																			{shiftSortKey === 'pattern'
-																				? shiftSortDirection === 'asc'
-																					? '↑'
-																					: '↓'
-																				: '↕'}
-																		</span>
-																	</button>
-																</th>
-																<th aria-sort={ariaSortForShift('start')}>
-																	<button
-																		type="button"
-																		class="tableSortBtn"
-																		on:click={() => toggleShiftSort('start')}
-																	>
-																		Start Date
-																		<span
-																			class={`sortIndicator${shiftSortKey === 'start' ? ' active' : ''}`}
-																			aria-hidden="true"
-																		>
-																			{shiftSortKey === 'start'
-																				? shiftSortDirection === 'asc'
-																					? '↑'
-																					: '↓'
-																				: '↕'}
-																		</span>
-																	</button>
-																</th>
-															{/if}
-															{#if activeSection === 'shiftsWorkshop'}
-																<th>End Date</th>
-															{/if}
-															<th>Changes</th>
-															<th></th>
-														</tr>
-													</thead>
-													<tbody>
-														{#each displayedShifts as shift}
-															<tr
-																class:shiftDraggingRow={activeSection === 'shiftsWorkshop' &&
-																	draggingShiftEmployeeTypeId === shift.employeeTypeId}
-																class:shiftDragTargetRow={activeSection === 'shiftsWorkshop' &&
-																	dragOverShiftEmployeeTypeId === shift.employeeTypeId &&
-																	draggingShiftEmployeeTypeId !== shift.employeeTypeId}
-																on:dragover={(event) => handleShiftDragOver(event, shift)}
-																on:drop={(event) => void handleShiftDrop(event, shift)}
-																on:dragleave={() => handleShiftDragLeave(shift)}
-															>
-																{#if activeSection !== 'shiftsWorkshop'}
-																	<td>{shift.sortOrder}</td>
-																{/if}
-																{#if activeSection === 'shiftsWorkshop'}
-																	<td class="shiftHandleCell">
+											{#if isWorkshopLikeShiftsSection(activeSection)}
+												<ReorderTable
+													shifts={displayedShifts}
+													{expandedShiftRows}
+													{isShiftReorderLoading}
+													{displayShiftEndDate}
+													{hasShiftHistoryChanges}
+													changesForShift={(shift) =>
+														shiftChangesForMonth(shift, shiftsWorkshopMonth)}
+													onToggleShiftDetails={toggleShiftDetails}
+													onEditShift={openEditShiftView}
+													onEditShiftHistory={openEditShiftHistoryView}
+													onReorder={saveShiftReorder}
+												/>
+											{:else}
+												<HorizontalScrollArea>
+													<table
+														class={`setupTable${activeSection === 'shifts' ? ' shiftsWorkshopTable' : ''}`}
+														bind:this={shiftsWorkshopTableEl}
+													>
+														<thead>
+															<tr>
+																{#if activeSection !== 'shifts'}
+																	<th aria-sort={ariaSortForShift('order')}>
 																		<button
 																			type="button"
-																			class="shiftReorderHandleBtn"
-																			class:active={
-																				draggingShiftEmployeeTypeId === shift.employeeTypeId
-																			}
-																			draggable={!isShiftReorderLoading}
-																			aria-label={`Move ${shift.name}`}
-																			title="Drag to reorder shift"
-																			on:dragstart={(event) => handleShiftDragStart(event, shift)}
-																			on:dragend={clearShiftDragState}
-																			disabled={isShiftReorderLoading}
+																			class="tableSortBtn"
+																			on:click={() => toggleShiftSort('order')}
 																		>
-																			<svg
-																				class="shiftReorderHandleIcon"
-																				viewBox="0 0 12 16"
+																			Order
+																			<span
+																				class={`sortIndicator${shiftSortKey === 'order' ? ' active' : ''}`}
 																				aria-hidden="true"
-																				focusable="false"
 																			>
-																				<circle cx="3" cy="3" r="1.2" />
-																				<circle cx="9" cy="3" r="1.2" />
-																				<circle cx="3" cy="8" r="1.2" />
-																				<circle cx="9" cy="8" r="1.2" />
-																				<circle cx="3" cy="13" r="1.2" />
-																				<circle cx="9" cy="13" r="1.2" />
-																			</svg>
+																				{shiftSortKey === 'order'
+																					? shiftSortDirection === 'asc'
+																						? '↑'
+																						: '↓'
+																					: '↕'}
+																			</span>
+																		</button>
+																	</th>
+																{/if}
+																{#if activeSection === 'shifts'}
+																	<th class="shiftHandleColHead">
+																		<span class="srOnly">Reorder</span>
+																	</th>
+																	<th>Shift</th>
+																	<th>Pattern</th>
+																	<th>Start Date</th>
+																{:else}
+																	<th aria-sort={ariaSortForShift('name')}>
+																		<button
+																			type="button"
+																			class="tableSortBtn"
+																			on:click={() => toggleShiftSort('name')}
+																		>
+																			Shift
+																			<span
+																				class={`sortIndicator${shiftSortKey === 'name' ? ' active' : ''}`}
+																				aria-hidden="true"
+																			>
+																				{shiftSortKey === 'name'
+																					? shiftSortDirection === 'asc'
+																						? '↑'
+																						: '↓'
+																					: '↕'}
+																			</span>
+																		</button>
+																	</th>
+																	<th aria-sort={ariaSortForShift('pattern')}>
+																		<button
+																			type="button"
+																			class="tableSortBtn"
+																			on:click={() => toggleShiftSort('pattern')}
+																		>
+																			Pattern
+																			<span
+																				class={`sortIndicator${shiftSortKey === 'pattern' ? ' active' : ''}`}
+																				aria-hidden="true"
+																			>
+																				{shiftSortKey === 'pattern'
+																					? shiftSortDirection === 'asc'
+																						? '↑'
+																						: '↓'
+																					: '↕'}
+																			</span>
+																		</button>
+																	</th>
+																	<th aria-sort={ariaSortForShift('start')}>
+																		<button
+																			type="button"
+																			class="tableSortBtn"
+																			on:click={() => toggleShiftSort('start')}
+																		>
+																			Start Date
+																			<span
+																				class={`sortIndicator${shiftSortKey === 'start' ? ' active' : ''}`}
+																				aria-hidden="true"
+																			>
+																				{shiftSortKey === 'start'
+																					? shiftSortDirection === 'asc'
+																						? '↑'
+																						: '↓'
+																					: '↕'}
+																			</span>
+																		</button>
+																	</th>
+																{/if}
+																{#if activeSection === 'shifts'}
+																	<th>End Date</th>
+																{/if}
+																<th>Changes</th>
+																<th></th>
+															</tr>
+														</thead>
+														<tbody bind:this={shiftsWorkshopTbodyEl}>
+															{#each displayedShifts as shift}
+																{#if showShiftPlaceholderBefore(shift.employeeTypeId)}
+																	<tr class="shiftReorderPlaceholderRow">
+																		<td colspan={7}>
+																			<div
+																				class="shiftReorderPlaceholderBox"
+																				style={`--shift-ph-h:${Math.max(
+																					40,
+																					Math.round(shiftReorderState?.rowHeight ?? 40)
+																				)}px`}
+																			></div>
+																		</td>
+																	</tr>
+																{/if}
+																<tr
+																	data-shift-id={shift.employeeTypeId}
+																	class:shiftDraggingRow={activeSection === 'shifts' &&
+																		shiftReorderState?.sourceId === shift.employeeTypeId}
+																>
+																	{#if activeSection !== 'shifts'}
+																		<td>{shift.sortOrder}</td>
+																	{/if}
+																	{#if activeSection === 'shifts'}
+																		<td class="shiftHandleCell">
+																			<button
+																				type="button"
+																				class="shiftReorderHandleBtn"
+																				aria-label={`Move ${shift.name}`}
+																				title="Drag to reorder shift"
+																				on:mousedown={(event) =>
+																					handleShiftReorderMouseDown(event, shift)}
+																				disabled={isShiftReorderLoading}
+																			>
+																				<svg
+																					class="shiftReorderHandleIcon"
+																					viewBox="0 0 16 16"
+																					aria-hidden="true"
+																					focusable="false"
+																				>
+																					<path d="M3 4H13" />
+																					<path d="M3 8H13" />
+																					<path d="M3 12H13" />
+																				</svg>
+																			</button>
+																		</td>
+																	{/if}
+																	<td>{shift.name}</td>
+																	<td>{shift.pattern || 'Unassigned'}</td>
+																	<td>{formatDateForDisplay(shift.startDate)}</td>
+																	{#if activeSection === 'shifts'}
+																		<td>{displayShiftEndDate(shift)}</td>
+																	{/if}
+																	<td>
+																		{#if hasShiftHistoryChanges(shift)}
+																			<button
+																				type="button"
+																				class="rowChevronBtn"
+																				aria-label={expandedShiftRows.has(shift.employeeTypeId)
+																					? 'Hide shift change history'
+																					: 'Show shift change history'}
+																				aria-expanded={expandedShiftRows.has(shift.employeeTypeId)}
+																				on:click={() => toggleShiftDetails(shift.employeeTypeId)}
+																			>
+																				{expandedShiftRows.has(shift.employeeTypeId)
+																					? 'Hide'
+																					: 'Show'}
+																			</button>
+																		{:else}
+																			None
+																		{/if}
+																	</td>
+																	<td>
+																		<button
+																			type="button"
+																			class="btn"
+																			on:click={() => openEditShiftView(shift)}
+																		>
+																			Edit
 																		</button>
 																	</td>
-																{/if}
-																<td>{shift.name}</td>
-																<td>{shift.pattern || 'Unassigned'}</td>
-																<td>{shift.startDate}</td>
-																{#if activeSection === 'shiftsWorkshop'}
-																	<td>{displayShiftEndDate(shift)}</td>
-																{/if}
-																<td>
-																	{#if hasShiftHistoryChanges(shift)}
-																		<button
-																			type="button"
-																			class="rowChevronBtn"
-																			aria-label={expandedShiftRows.has(shift.employeeTypeId)
-																				? 'Hide shift change history'
-																				: 'Show shift change history'}
-																			aria-expanded={expandedShiftRows.has(shift.employeeTypeId)}
-																			on:click={() => toggleShiftDetails(shift.employeeTypeId)}
-																		>
-																			{expandedShiftRows.has(shift.employeeTypeId)
-																				? 'Hide'
-																				: 'Show'}
-																		</button>
-																	{:else}
-																		None
-																	{/if}
-																</td>
-																<td>
-																	<button
-																		type="button"
-																		class="btn"
-																		on:click={() => openEditShiftView(shift)}
-																	>
-																		Edit
-																	</button>
-																</td>
-															</tr>
-															{#if hasShiftHistoryChanges(shift) && expandedShiftRows.has(shift.employeeTypeId)}
-																<tr class="setupDetailsRow">
-																	<td colspan={activeSection === 'shiftsWorkshop' ? 7 : 6}>
-																		<HorizontalScrollArea>
-																			<table class="setupSubTable">
-																				<thead>
-																					<tr>
-																						<th>Name</th>
-																						<th>Pattern</th>
-																						<th>Effective Start</th>
-																						<th>Effective End</th>
-																						<th></th>
-																					</tr>
-																				</thead>
-																				<tbody>
-																					{#if !shift.changes || shift.changes.length === 0}
+																</tr>
+																{#if hasShiftHistoryChanges(shift) && expandedShiftRows.has(shift.employeeTypeId) && shiftReorderState?.sourceId !== shift.employeeTypeId}
+																	<tr class="setupDetailsRow">
+																		<td colspan={activeSection === 'shifts' ? 7 : 6}>
+																			<HorizontalScrollArea>
+																				<table class="setupSubTable">
+																					<thead>
 																						<tr>
-																							<td colspan="5">No changes found.</td>
+																								<th>Pattern</th>
+																								<th>Effective Start</th>
+																								<th>Effective End</th>
+																								<th></th>
 																						</tr>
-																					{:else}
-																						{#each shift.changes as change}
+																					</thead>
+																					<tbody>
+																						{#if shiftChangesForMonth(shift, shiftsWorkshopMonth).length === 0}
 																							<tr>
-																								<td>{change.name}</td>
-																								<td>{change.pattern || 'Unassigned'}</td>
-																								<td>{change.startDate}</td>
-																								<td>{change.endDate ?? 'Current'}</td>
-																								<td>
-																									<button
-																										type="button"
-																										class="btn"
-																										on:click={() =>
-																											openEditShiftHistoryView(shift, change)}
-																									>
-																										Edit
-																									</button>
-																								</td>
+																									<td colspan="4">No changes found.</td>
 																							</tr>
-																						{/each}
-																					{/if}
-																				</tbody>
-																			</table>
-																		</HorizontalScrollArea>
+																						{:else}
+																							{#each shiftChangesForMonth(shift, shiftsWorkshopMonth) as change}
+																								<tr>
+																										<td>{change.pattern || 'Unassigned'}</td>
+																									<td>{formatDateForDisplay(change.startDate)}</td>
+																									<td
+																										>{formatOptionalDateForDisplay(
+																											change.endDate,
+																											'Indefinite'
+																										)}</td
+																									>
+																									<td>
+																										<button
+																											type="button"
+																											class="btn"
+																											on:click={() =>
+																												openEditShiftHistoryView(shift, change)}
+																										>
+																											Edit
+																										</button>
+																									</td>
+																								</tr>
+																							{/each}
+																						{/if}
+																					</tbody>
+																				</table>
+																			</HorizontalScrollArea>
+																		</td>
+																	</tr>
+																{/if}
+															{/each}
+															{#if showShiftPlaceholderAtEnd()}
+																<tr class="shiftReorderPlaceholderRow">
+																	<td colspan={7}>
+																		<div
+																			class="shiftReorderPlaceholderBox"
+																			style={`--shift-ph-h:${Math.max(
+																				40,
+																				Math.round(shiftReorderState?.rowHeight ?? 40)
+																			)}px`}
+																		></div>
 																	</td>
 																</tr>
 															{/if}
-														{/each}
-													</tbody>
-												</table>
-											</HorizontalScrollArea>
+														</tbody>
+													</table>
+												</HorizontalScrollArea>
+											{/if}
 											{#if addShiftActionError}
 												<div class="setupActionAlert" role="alert">{addShiftActionError}</div>
 											{/if}
@@ -3778,7 +4408,7 @@
 												: 'Add Shift'}
 										</h4>
 										<div class="setupShiftForm">
-											{#if activeSection === 'shiftsWorkshop'}
+											{#if isWorkshopLikeShiftsSection(activeSection)}
 												<div class="setupShiftSecondaryFields">
 													<div class="setupField workshopDateField workshopDateFieldTransparent">
 														<span class="setupFieldLabel">Shift Name</span>
@@ -3879,7 +4509,7 @@
 												</div>
 											{/if}
 											<div class="setupShiftSecondaryFields">
-												{#if activeSection !== 'shiftsWorkshop'}
+												{#if !isWorkshopLikeShiftsSection(activeSection)}
 													<div class="setupField">
 														<span class="setupFieldLabel">Pattern</span>
 														<div class="setupPatternPicker">
@@ -4253,14 +4883,10 @@
 									</div>
 								{/if}
 							</section>
-						{:else if activeSection === 'assignments' || activeSection === 'assignmentsWorkshop'}
+						{:else if activeSection === 'assignments'}
 							<section class="setupSection">
 								<div class="usersPaneHeader">
-									<h3>
-										{activeSection === 'assignmentsWorkshop'
-											? 'Assignments Workshop'
-											: 'Assignments'}
-									</h3>
+									<h3>Assignments</h3>
 									{#if assignmentsViewMode === 'list'}
 										<button
 											type="button"
@@ -4329,7 +4955,7 @@
 																	<td>{assignment.userName}</td>
 																	<td>{assignment.shiftName}</td>
 																	<td>{assignment.sortOrder}</td>
-																	<td>{assignment.startDate}</td>
+																	<td>{formatDateForDisplay(assignment.startDate)}</td>
 																	<td>
 																		{#if hasAssignmentHistoryChanges(assignment)}
 																			<button
@@ -4388,8 +5014,13 @@
 																								<tr>
 																									<td>{change.shiftName}</td>
 																									<td>{change.sortOrder}</td>
-																									<td>{change.startDate}</td>
-																									<td>{change.endDate ?? 'Current'}</td>
+																									<td>{formatDateForDisplay(change.startDate)}</td>
+																									<td
+																										>{formatOptionalDateForDisplay(
+																											change.endDate,
+																											'Current'
+																										)}</td
+																									>
 																									<td>
 																										<button
 																											type="button"
@@ -4857,6 +5488,113 @@
 													</button>
 												</div>
 											</div>
+
+											<div class="eventCodeReminderSection">
+												<div class="eventCodeReminderTitle">Reminders</div>
+												<ThemedCheckbox
+													id="event-code-reminder-immediate"
+													bind:checked={addEventCodeReminderImmediate}
+													label="Notify Immediately"
+												/>
+												<ThemedCheckbox
+													id="event-code-reminder-scheduled"
+													bind:checked={addEventCodeReminderScheduled}
+													label="Scheduled Reminders"
+												/>
+												{#if addEventCodeReminderScheduled}
+													<div class="eventCodeReminderPickerStack">
+														<div class="eventCodeReminderHeaderRow" aria-hidden="true">
+															<span>Amount</span>
+															<span>Unit</span>
+															<span>Time</span>
+															<span>AM/PM</span>
+															<span class="eventCodeReminderHeaderAction"></span>
+														</div>
+														{#each eventCodeReminderDrafts as reminderDraft (reminderDraft.id)}
+															<div class="eventCodeReminderRowWrap">
+																<div class="eventCodeReminderPickerRow">
+																	<ThemedSpinPicker
+																		id={`event-code-reminder-amount-${reminderDraft.id}`}
+																		options={eventCodeReminderAmountOptions}
+																		value={reminderDraft.amount}
+																		on:value={(event) =>
+																			updateEventCodeReminderDraft(
+																				reminderDraft.id,
+																				'amount',
+																				event.detail
+																			)}
+																	/>
+																	<ThemedSpinPicker
+																		id={`event-code-reminder-unit-${reminderDraft.id}`}
+																		options={eventCodeReminderUnitOptions}
+																		value={reminderDraft.unit}
+																		on:value={(event) =>
+																			updateEventCodeReminderDraft(
+																				reminderDraft.id,
+																				'unit',
+																				event.detail
+																			)}
+																	/>
+																	<ThemedSpinPicker
+																		id={`event-code-reminder-hour-${reminderDraft.id}`}
+																		options={eventCodeReminderHourOptions}
+																		value={reminderDraft.hour}
+																		on:value={(event) =>
+																			updateEventCodeReminderDraft(
+																				reminderDraft.id,
+																				'hour',
+																				event.detail
+																			)}
+																	/>
+																	<ThemedSpinPicker
+																		id={`event-code-reminder-meridiem-${reminderDraft.id}`}
+																		options={eventCodeReminderMeridiemOptions}
+																		value={reminderDraft.meridiem}
+																		on:value={(event) =>
+																			updateEventCodeReminderDraft(
+																				reminderDraft.id,
+																				'meridiem',
+																				event.detail
+																			)}
+																	/>
+																</div>
+																<button
+																	type="button"
+																	class="eventCodeReminderRemoveBtn"
+																	on:click={() => removeEventCodeReminderDraft(reminderDraft.id)}
+																	aria-label="Remove scheduled reminder"
+																>
+																	<svg viewBox="0 0 24 24" aria-hidden="true">
+																		<path d="M6 6l12 12M18 6L6 18" />
+																	</svg>
+																</button>
+															</div>
+														{/each}
+														{#if canAddEventCodeReminderDraft}
+															<button
+																type="button"
+																class="eventCodeReminderAddBtn"
+																on:click={addEventCodeReminderDraft}
+																aria-label="Add another scheduled reminder"
+															>
+																<svg viewBox="0 0 24 24" aria-hidden="true">
+																	<path d="M12 5v14M5 12h14" />
+																</svg>
+															</button>
+														{/if}
+														<div class="eventCodeReminderSummary">
+															<div class="eventCodeReminderSummaryTitle">
+																{eventCodeReminderSummaryTitle}
+															</div>
+															{#each eventCodeReminderSummaryLines as reminderSummaryLine}
+																<div class="eventCodeReminderSummaryLine">
+																	{reminderSummaryLine}
+																</div>
+															{/each}
+														</div>
+													</div>
+												{/if}
+											</div>
 										</div>
 
 										<div class="setupActions">
@@ -4915,4 +5653,29 @@
 			{/if}
 		</div>
 	</div>
+	{#if shiftReorderState && shiftReorderGhostShift}
+		<div class="shiftReorderGhost" style={shiftReorderGhostStyle()} use:portalToBody>
+			<table aria-hidden="true">
+				<tbody>
+					<tr>
+						<td class="shiftHandleCell">
+							<span class="shiftReorderHandleBtn" aria-hidden="true">
+								<svg class="shiftReorderHandleIcon" viewBox="0 0 16 16" focusable="false">
+									<path d="M3 4H13" />
+									<path d="M3 8H13" />
+									<path d="M3 12H13" />
+								</svg>
+							</span>
+						</td>
+						<td>{shiftReorderGhostShift.name}</td>
+						<td>{shiftReorderGhostShift.pattern || 'Unassigned'}</td>
+						<td>{formatDateForDisplay(shiftReorderGhostShift.startDate)}</td>
+						<td>{displayShiftEndDate(shiftReorderGhostShift)}</td>
+						<td>{hasShiftHistoryChanges(shiftReorderGhostShift) ? 'History' : 'None'}</td>
+						<td>Moving...</td>
+					</tr>
+				</tbody>
+			</table>
+		</div>
+	{/if}
 {/if}

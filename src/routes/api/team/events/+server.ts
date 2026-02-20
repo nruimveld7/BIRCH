@@ -2,6 +2,7 @@ import { error, json } from '@sveltejs/kit';
 import type { Cookies, RequestHandler } from '@sveltejs/kit';
 import { GetPool } from '$lib/server/db';
 import { getActiveScheduleId } from '$lib/server/auth';
+import { sendUpcomingEventNotification } from '$lib/server/mail/notifications';
 
 type ScheduleRole = 'Member' | 'Maintainer' | 'Manager';
 type EventScopeType = 'global' | 'shift' | 'user';
@@ -23,6 +24,8 @@ type ScheduleEventRow = {
 	CoverageLabel: string | null;
 	CoverageDisplayMode: EventDisplayMode | null;
 	CoverageColor: string | null;
+	NotifyImmediately: boolean | null;
+	ScheduledRemindersJson: string | null;
 };
 
 type ExistingEventScopeRow = {
@@ -34,6 +37,20 @@ type ExistingEventScopeRow = {
 type ScheduleEventsCapabilities = {
 	hasEmployeeTypeId: boolean;
 	hasCustomColumns: boolean;
+	hasReminderColumns: boolean;
+};
+
+type ReminderUnit = 'days' | 'weeks' | 'months';
+type ReminderMeridiem = 'AM' | 'PM';
+type ReminderDraft = {
+	amount: number;
+	unit: ReminderUnit;
+	hour: number;
+	meridiem: ReminderMeridiem;
+};
+type AffectedEventMember = {
+	name: string;
+	email: string | null;
 };
 
 const allowedDisplayModes = new Set<EventDisplayMode>([
@@ -182,6 +199,76 @@ function cleanOptionalColor(value: unknown): string | null {
 	return trimmed;
 }
 
+function cleanNotifyImmediately(value: unknown): boolean {
+	if (typeof value === 'boolean') return value;
+	if (value === null || value === undefined) return false;
+	throw error(400, 'Notify immediately is invalid');
+}
+
+function cleanScheduledReminders(value: unknown): ReminderDraft[] {
+	if (value === null || value === undefined || value === '') return [];
+	if (!Array.isArray(value)) {
+		throw error(400, 'Scheduled reminders are invalid');
+	}
+	const normalized: ReminderDraft[] = [];
+	const seenKeys = new Set<string>();
+	for (const entry of value) {
+		if (!entry || typeof entry !== 'object') continue;
+		const row = entry as Record<string, unknown>;
+		const amount = Number(row.amount);
+		const hour = Number(row.hour);
+		const unit = row.unit;
+		const meridiem = row.meridiem;
+		if (!Number.isInteger(amount) || amount < 0 || amount > 30) {
+			throw error(400, 'Scheduled reminder amount must be an integer between 0 and 30');
+		}
+		if (unit !== 'days' && unit !== 'weeks' && unit !== 'months') {
+			throw error(400, 'Scheduled reminder unit is invalid');
+		}
+		if (!Number.isInteger(hour) || hour < 0 || hour > 12) {
+			throw error(400, 'Scheduled reminder hour must be an integer between 0 and 12');
+		}
+		if (meridiem !== 'AM' && meridiem !== 'PM') {
+			throw error(400, 'Scheduled reminder AM/PM is invalid');
+		}
+		const key = `${amount}|${unit}|${hour}|${meridiem}`;
+		if (seenKeys.has(key)) continue;
+		seenKeys.add(key);
+		normalized.push({ amount, unit, hour, meridiem });
+	}
+	return normalized;
+}
+
+function remindersToJson(reminders: ReminderDraft[]): string | null {
+	if (reminders.length === 0) return null;
+	return JSON.stringify(reminders);
+}
+
+function parseScheduledRemindersJson(value: string | null): ReminderDraft[] {
+	if (!value) return [];
+	try {
+		const parsed = JSON.parse(value) as unknown;
+		if (!Array.isArray(parsed)) return [];
+		const output: ReminderDraft[] = [];
+		for (const entry of parsed) {
+			if (!entry || typeof entry !== 'object') continue;
+			const row = entry as Record<string, unknown>;
+			const amount = Number(row.amount);
+			const hour = Number(row.hour);
+			const unit = row.unit;
+			const meridiem = row.meridiem;
+			if (!Number.isInteger(amount) || amount < 0 || amount > 30) continue;
+			if (unit !== 'days' && unit !== 'weeks' && unit !== 'months') continue;
+			if (!Number.isInteger(hour) || hour < 0 || hour > 12) continue;
+			if (meridiem !== 'AM' && meridiem !== 'PM') continue;
+			output.push({ amount, unit, hour, meridiem });
+		}
+		return output;
+	} catch {
+		return [];
+	}
+}
+
 function toDateOnly(value: Date | string | null): string | null {
 	if (!value) return null;
 	if (value instanceof Date) return value.toISOString().slice(0, 10);
@@ -207,7 +294,9 @@ async function getScheduleEventsCapabilities(
 			columns.has('CustomCode') &&
 			columns.has('CustomName') &&
 			columns.has('CustomDisplayMode') &&
-			columns.has('CustomColor')
+			columns.has('CustomColor'),
+		hasReminderColumns:
+			columns.has('NotifyImmediately') && columns.has('ScheduledRemindersJson')
 	};
 }
 
@@ -265,6 +354,138 @@ async function ensureCoverageCodeIsValid(
 	if (!codeResult.recordset?.[0]?.HasCode) {
 		throw error(400, 'Selected event code is no longer available');
 	}
+}
+
+function formatEventDateForEmail(startDate: string, endDate: string): string {
+	const formatter = new Intl.DateTimeFormat('en-US', {
+		month: 'short',
+		day: 'numeric',
+		year: 'numeric'
+	});
+	const start = new Date(`${startDate}T00:00:00Z`);
+	const end = new Date(`${endDate}T00:00:00Z`);
+	if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+		return startDate === endDate ? startDate : `${startDate} to ${endDate}`;
+	}
+	const startText = formatter.format(start);
+	const endText = formatter.format(end);
+	return startDate === endDate ? startText : `${startText} to ${endText}`;
+}
+
+async function getEventEmailContext(pool: Awaited<ReturnType<typeof GetPool>>, scheduleId: number) {
+	const result = await pool.request().input('scheduleId', scheduleId).query(
+		`SELECT TOP (1)
+			s.Name AS ScheduleName,
+			s.ThemeJson AS ScheduleThemeJson
+		 FROM dbo.Schedules s
+		 WHERE s.ScheduleId = @scheduleId;`
+	);
+	const row = result.recordset?.[0] as
+		| {
+				ScheduleName: string | null;
+				ScheduleThemeJson: string | null;
+		  }
+		| undefined;
+	if (!row?.ScheduleName?.trim()) return null;
+	return {
+		scheduleName: row.ScheduleName.trim(),
+		scheduleThemeJson: row.ScheduleThemeJson ?? null
+	};
+}
+
+async function getAffectedEventMemberNames(params: {
+	pool: Awaited<ReturnType<typeof GetPool>>;
+	scheduleId: number;
+	scope: EventScopeType;
+	employeeTypeId: number | null;
+	userOid: string | null;
+	startDate: string;
+	endDate: string;
+}): Promise<AffectedEventMember[]> {
+	const { pool, scheduleId, scope, employeeTypeId, userOid, startDate, endDate } = params;
+	if (scope === 'user') {
+		if (!userOid) return [];
+		const result = await pool
+			.request()
+			.input('scheduleId', scheduleId)
+			.input('userOid', userOid)
+			.query(
+				`SELECT TOP (1)
+					COALESCE(NULLIF(LTRIM(RTRIM(u.DisplayName)), ''), NULLIF(LTRIM(RTRIM(u.FullName)), ''), u.UserOid) AS MemberName,
+					NULLIF(LTRIM(RTRIM(u.Email)), '') AS MemberEmail
+				 FROM dbo.ScheduleUsers su
+				 INNER JOIN dbo.Users u
+				   ON u.UserOid = su.UserOid
+				 WHERE su.ScheduleId = @scheduleId
+				   AND su.UserOid = @userOid
+				   AND su.IsActive = 1
+				   AND su.DeletedAt IS NULL;`
+			);
+		const name = result.recordset?.[0]?.MemberName?.trim();
+		const email = result.recordset?.[0]?.MemberEmail?.trim() || null;
+		return name ? [{ name, email }] : [];
+	}
+
+	if (scope === 'shift') {
+		if (!employeeTypeId) return [];
+		const result = await pool
+			.request()
+			.input('scheduleId', scheduleId)
+			.input('employeeTypeId', employeeTypeId)
+			.input('startDate', startDate)
+			.input('endDate', endDate)
+			.query(
+				`SELECT DISTINCT
+					COALESCE(NULLIF(LTRIM(RTRIM(u.DisplayName)), ''), NULLIF(LTRIM(RTRIM(u.FullName)), ''), u.UserOid) AS MemberName,
+					NULLIF(LTRIM(RTRIM(u.Email)), '') AS MemberEmail
+				 FROM dbo.ScheduleUserTypes sut
+				 INNER JOIN dbo.ScheduleUsers su
+				   ON su.ScheduleId = sut.ScheduleId
+				  AND su.UserOid = sut.UserOid
+				 INNER JOIN dbo.Users u
+				   ON u.UserOid = sut.UserOid
+				 WHERE sut.ScheduleId = @scheduleId
+				   AND sut.EmployeeTypeId = @employeeTypeId
+				   AND sut.IsActive = 1
+				   AND sut.DeletedAt IS NULL
+				   AND su.IsActive = 1
+				   AND su.DeletedAt IS NULL
+				   AND sut.StartDate <= @endDate
+				   AND (sut.EndDate IS NULL OR sut.EndDate >= @startDate)
+				 ORDER BY MemberName ASC;`
+			);
+		return (result.recordset as Array<{ MemberName: string | null; MemberEmail: string | null }>)
+			.map((row) => ({ name: row.MemberName?.trim() || '', email: row.MemberEmail?.trim() || null }))
+			.filter((row) => Boolean(row.name));
+	}
+
+	const result = await pool
+		.request()
+		.input('scheduleId', scheduleId)
+		.input('startDate', startDate)
+		.input('endDate', endDate)
+		.query(
+		`SELECT DISTINCT
+			COALESCE(NULLIF(LTRIM(RTRIM(u.DisplayName)), ''), NULLIF(LTRIM(RTRIM(u.FullName)), ''), u.UserOid) AS MemberName,
+			NULLIF(LTRIM(RTRIM(u.Email)), '') AS MemberEmail
+		 FROM dbo.ScheduleUserTypes sut
+		 INNER JOIN dbo.ScheduleUsers su
+		   ON su.ScheduleId = sut.ScheduleId
+		  AND su.UserOid = sut.UserOid
+		 INNER JOIN dbo.Users u
+		   ON u.UserOid = sut.UserOid
+		 WHERE sut.ScheduleId = @scheduleId
+		   AND sut.IsActive = 1
+		   AND sut.DeletedAt IS NULL
+		   AND su.IsActive = 1
+		   AND su.DeletedAt IS NULL
+		   AND sut.StartDate <= @endDate
+		   AND (sut.EndDate IS NULL OR sut.EndDate >= @startDate)
+		 ORDER BY MemberName ASC;`
+		);
+	return (result.recordset as Array<{ MemberName: string | null; MemberEmail: string | null }>)
+		.map((row) => ({ name: row.MemberName?.trim() || '', email: row.MemberEmail?.trim() || null }))
+		.filter((row) => Boolean(row.name));
 }
 
 async function cleanScopeInputs(
@@ -342,6 +563,12 @@ export const GET: RequestHandler = async ({ locals, cookies, url }) => {
 	const selectCustomColor = capabilities.hasCustomColumns
 		? 'se.CustomColor'
 		: 'CAST(NULL AS nvarchar(20)) AS CustomColor';
+	const selectNotifyImmediately = capabilities.hasReminderColumns
+		? 'se.NotifyImmediately'
+		: 'CAST(0 AS bit) AS NotifyImmediately';
+	const selectScheduledRemindersJson = capabilities.hasReminderColumns
+		? 'se.ScheduledRemindersJson'
+		: 'CAST(NULL AS nvarchar(max)) AS ScheduledRemindersJson';
 	const globalPredicate = capabilities.hasEmployeeTypeId
 		? '(se.EmployeeTypeId IS NULL AND se.UserOid IS NULL)'
 		: '(se.UserOid IS NULL)';
@@ -376,6 +603,8 @@ export const GET: RequestHandler = async ({ locals, cookies, url }) => {
 			${selectCustomName},
 			${selectCustomDisplayMode},
 			${selectCustomColor},
+			${selectNotifyImmediately},
+			${selectScheduledRemindersJson},
 			cc.Code AS CoverageCode,
 			cc.Label AS CoverageLabel,
 			cc.DisplayMode AS CoverageDisplayMode,
@@ -422,7 +651,9 @@ export const GET: RequestHandler = async ({ locals, cookies, url }) => {
 			startDate: toDateOnly(row.StartDate) ?? '',
 			endDate: toDateOnly(row.EndDate) ?? '',
 			comments: row.Notes?.trim() ?? '',
-			isCustom
+			isCustom,
+			notifyImmediately: Boolean(row.NotifyImmediately),
+			scheduledReminders: parseScheduledRemindersJson(row.ScheduledRemindersJson)
 		};
 	});
 
@@ -459,14 +690,60 @@ export const POST: RequestHandler = async ({ locals, cookies, request }) => {
 
 	const comments = cleanOptionalComments(body.comments);
 	const coverageCodeId = cleanOptionalInt(body.coverageCodeId, 'Event code');
+	const hasNotifyImmediatelyInput = Object.prototype.hasOwnProperty.call(body, 'notifyImmediately');
+	const hasScheduledRemindersInput = Object.prototype.hasOwnProperty.call(body, 'scheduledReminders');
+	let notifyImmediately = cleanNotifyImmediately(
+		hasNotifyImmediatelyInput ? body.notifyImmediately : undefined
+	);
+	let scheduledReminders = cleanScheduledReminders(
+		hasScheduledRemindersInput ? body.scheduledReminders : []
+	);
 
 	let customCode: string | null = null;
 	let customName: string | null = null;
 	let customDisplayMode: EventDisplayMode | null = null;
 	let customColor: string | null = null;
+	let notificationEventName = 'Event';
 
 	if (coverageCodeId !== null) {
 		await ensureCoverageCodeIsValid(pool, scheduleId, coverageCodeId);
+		const codeResult = await pool
+			.request()
+			.input('scheduleId', scheduleId)
+			.input('coverageCodeId', coverageCodeId)
+			.query(
+				`SELECT TOP (1) Label, Code
+				 FROM dbo.CoverageCodes
+				 WHERE ScheduleId = @scheduleId
+				   AND CoverageCodeId = @coverageCodeId
+				   AND DeletedAt IS NULL;`
+			);
+		notificationEventName =
+			codeResult.recordset?.[0]?.Label?.trim() ||
+			codeResult.recordset?.[0]?.Code?.trim() ||
+			'Event';
+		if (capabilities.hasReminderColumns && (!hasNotifyImmediatelyInput || !hasScheduledRemindersInput)) {
+			const defaultsResult = await pool
+				.request()
+				.input('scheduleId', scheduleId)
+				.input('coverageCodeId', coverageCodeId)
+				.query(
+					`SELECT TOP (1) NotifyImmediately, ScheduledRemindersJson
+					 FROM dbo.CoverageCodes
+					 WHERE ScheduleId = @scheduleId
+					   AND CoverageCodeId = @coverageCodeId
+					   AND DeletedAt IS NULL;`
+				);
+			const defaultRow = defaultsResult.recordset?.[0] as
+				| { NotifyImmediately: boolean | null; ScheduledRemindersJson: string | null }
+				| undefined;
+			if (!hasNotifyImmediatelyInput) {
+				notifyImmediately = Boolean(defaultRow?.NotifyImmediately);
+			}
+			if (!hasScheduledRemindersInput) {
+				scheduledReminders = parseScheduledRemindersJson(defaultRow?.ScheduledRemindersJson ?? null);
+			}
+		}
 	} else {
 		if (!capabilities.hasCustomColumns) {
 			throw error(400, 'Custom events require a ScheduleEvents schema update.');
@@ -481,7 +758,9 @@ export const POST: RequestHandler = async ({ locals, cookies, request }) => {
 			);
 		}
 		customName = cleanOptionalCustomName(body.customName, customCode);
+		notificationEventName = customName || customCode || 'Custom Event';
 	}
+	const scheduledRemindersJson = remindersToJson(scheduledReminders);
 
 	const insertColumns = ['ScheduleId', 'UserOid', 'StartDate', 'EndDate', 'CoverageCodeId', 'Notes', 'CreatedBy'];
 	const insertValues = ['@scheduleId', '@userOid', '@startDate', '@endDate', '@coverageCodeId', '@comments', '@actorOid'];
@@ -492,6 +771,10 @@ export const POST: RequestHandler = async ({ locals, cookies, request }) => {
 	if (capabilities.hasCustomColumns) {
 		insertColumns.splice(5, 0, 'CustomCode', 'CustomName', 'CustomDisplayMode', 'CustomColor');
 		insertValues.splice(5, 0, '@customCode', '@customName', '@customDisplayMode', '@customColor');
+	}
+	if (capabilities.hasReminderColumns) {
+		insertColumns.splice(6, 0, 'NotifyImmediately', 'ScheduledRemindersJson');
+		insertValues.splice(6, 0, '@notifyImmediately', '@scheduledRemindersJson');
 	}
 
 	const insertResult = await pool
@@ -506,6 +789,8 @@ export const POST: RequestHandler = async ({ locals, cookies, request }) => {
 		.input('customName', customName)
 		.input('customDisplayMode', customDisplayMode)
 		.input('customColor', customColor)
+		.input('notifyImmediately', notifyImmediately)
+		.input('scheduledRemindersJson', scheduledRemindersJson)
 		.input('comments', comments || null)
 		.input('actorOid', actorOid)
 		.query(
@@ -514,7 +799,46 @@ export const POST: RequestHandler = async ({ locals, cookies, request }) => {
 			VALUES (${insertValues.join(', ')});`
 		);
 
-	return json({ eventId: Number(insertResult.recordset?.[0]?.EventId ?? 0) }, { status: 201 });
+	const eventId = Number(insertResult.recordset?.[0]?.EventId ?? 0);
+
+	if (notifyImmediately) {
+		try {
+			const context = await getEventEmailContext(pool, scheduleId);
+			if (context) {
+				const affectedUsers = await getAffectedEventMemberNames({
+					pool,
+					scheduleId,
+					scope,
+					employeeTypeId,
+					userOid,
+					startDate,
+					endDate
+				});
+				const intendedRecipients = affectedUsers
+					.map((member) => member.email)
+					.filter((email): email is string => Boolean(email));
+				const affectedUserNames = affectedUsers.map((member) => member.name);
+				const targetMemberName =
+					affectedUserNames.length === 0
+						? 'Schedule Members'
+						: affectedUserNames.length <= 5
+							? affectedUserNames.join(', ')
+							: `${affectedUserNames.length} schedule members`;
+				await sendUpcomingEventNotification({
+					scheduleName: context.scheduleName,
+					themeJson: context.scheduleThemeJson,
+					intendedRecipients,
+					targetMemberName,
+					eventName: notificationEventName,
+					date: formatEventDateForEmail(startDate, endDate)
+				});
+			}
+		} catch (notificationError) {
+			console.error('Upcoming event immediate notification failed:', notificationError);
+		}
+	}
+
+	return json({ eventId }, { status: 201 });
 };
 
 export const PATCH: RequestHandler = async ({ locals, cookies, request }) => {
@@ -569,14 +893,60 @@ export const PATCH: RequestHandler = async ({ locals, cookies, request }) => {
 
 	const comments = cleanOptionalComments(body.comments);
 	const coverageCodeId = cleanOptionalInt(body.coverageCodeId, 'Event code');
+	const hasNotifyImmediatelyInput = Object.prototype.hasOwnProperty.call(body, 'notifyImmediately');
+	const hasScheduledRemindersInput = Object.prototype.hasOwnProperty.call(body, 'scheduledReminders');
+	let notifyImmediately = cleanNotifyImmediately(
+		hasNotifyImmediatelyInput ? body.notifyImmediately : undefined
+	);
+	let scheduledReminders = cleanScheduledReminders(
+		hasScheduledRemindersInput ? body.scheduledReminders : []
+	);
 
 	let customCode: string | null = null;
 	let customName: string | null = null;
 	let customDisplayMode: EventDisplayMode | null = null;
 	let customColor: string | null = null;
+	let notificationEventName = 'Event';
 
 	if (coverageCodeId !== null) {
 		await ensureCoverageCodeIsValid(pool, scheduleId, coverageCodeId);
+		const codeResult = await pool
+			.request()
+			.input('scheduleId', scheduleId)
+			.input('coverageCodeId', coverageCodeId)
+			.query(
+				`SELECT TOP (1) Label, Code
+				 FROM dbo.CoverageCodes
+				 WHERE ScheduleId = @scheduleId
+				   AND CoverageCodeId = @coverageCodeId
+				   AND DeletedAt IS NULL;`
+			);
+		notificationEventName =
+			codeResult.recordset?.[0]?.Label?.trim() ||
+			codeResult.recordset?.[0]?.Code?.trim() ||
+			'Event';
+		if (capabilities.hasReminderColumns && (!hasNotifyImmediatelyInput || !hasScheduledRemindersInput)) {
+			const defaultsResult = await pool
+				.request()
+				.input('scheduleId', scheduleId)
+				.input('coverageCodeId', coverageCodeId)
+				.query(
+					`SELECT TOP (1) NotifyImmediately, ScheduledRemindersJson
+					 FROM dbo.CoverageCodes
+					 WHERE ScheduleId = @scheduleId
+					   AND CoverageCodeId = @coverageCodeId
+					   AND DeletedAt IS NULL;`
+				);
+			const defaultRow = defaultsResult.recordset?.[0] as
+				| { NotifyImmediately: boolean | null; ScheduledRemindersJson: string | null }
+				| undefined;
+			if (!hasNotifyImmediatelyInput) {
+				notifyImmediately = Boolean(defaultRow?.NotifyImmediately);
+			}
+			if (!hasScheduledRemindersInput) {
+				scheduledReminders = parseScheduledRemindersJson(defaultRow?.ScheduledRemindersJson ?? null);
+			}
+		}
 	} else {
 		if (!capabilities.hasCustomColumns) {
 			throw error(400, 'Custom events require a ScheduleEvents schema update.');
@@ -591,7 +961,9 @@ export const PATCH: RequestHandler = async ({ locals, cookies, request }) => {
 			);
 		}
 		customName = cleanOptionalCustomName(body.customName, customCode);
+		notificationEventName = customName || customCode || 'Custom Event';
 	}
+	const scheduledRemindersJson = remindersToJson(scheduledReminders);
 
 	const setClauses = [
 		'UserOid = @userOid',
@@ -605,6 +977,9 @@ export const PATCH: RequestHandler = async ({ locals, cookies, request }) => {
 	}
 	if (capabilities.hasCustomColumns) {
 		setClauses.splice(4, 0, 'CustomCode = @customCode', 'CustomName = @customName', 'CustomDisplayMode = @customDisplayMode', 'CustomColor = @customColor');
+	}
+	if (capabilities.hasReminderColumns) {
+		setClauses.push('NotifyImmediately = @notifyImmediately', 'ScheduledRemindersJson = @scheduledRemindersJson');
 	}
 
 	await pool
@@ -620,6 +995,8 @@ export const PATCH: RequestHandler = async ({ locals, cookies, request }) => {
 		.input('customName', customName)
 		.input('customDisplayMode', customDisplayMode)
 		.input('customColor', customColor)
+		.input('notifyImmediately', notifyImmediately)
+		.input('scheduledRemindersJson', scheduledRemindersJson)
 		.input('comments', comments || null)
 		.query(
 			`UPDATE dbo.ScheduleEvents
@@ -629,6 +1006,44 @@ export const PATCH: RequestHandler = async ({ locals, cookies, request }) => {
 			   AND IsActive = 1
 			   AND DeletedAt IS NULL;`
 		);
+
+	if (notifyImmediately) {
+		const scopeType: EventScopeType = userOid ? 'user' : employeeTypeId !== null ? 'shift' : 'global';
+		try {
+			const context = await getEventEmailContext(pool, scheduleId);
+			if (context) {
+				const affectedUsers = await getAffectedEventMemberNames({
+					pool,
+					scheduleId,
+					scope: scopeType,
+					employeeTypeId,
+					userOid,
+					startDate,
+					endDate
+				});
+				const intendedRecipients = affectedUsers
+					.map((member) => member.email)
+					.filter((email): email is string => Boolean(email));
+				const affectedUserNames = affectedUsers.map((member) => member.name);
+				const targetMemberName =
+					affectedUserNames.length === 0
+						? 'Schedule Members'
+						: affectedUserNames.length <= 5
+							? affectedUserNames.join(', ')
+							: `${affectedUserNames.length} schedule members`;
+				await sendUpcomingEventNotification({
+					scheduleName: context.scheduleName,
+					themeJson: context.scheduleThemeJson,
+					intendedRecipients,
+					targetMemberName,
+					eventName: notificationEventName,
+					date: formatEventDateForEmail(startDate, endDate)
+				});
+			}
+		} catch (notificationError) {
+			console.error('Upcoming event immediate notification failed:', notificationError);
+		}
+	}
 
 	return json({ success: true });
 };

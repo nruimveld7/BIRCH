@@ -534,6 +534,7 @@ button.setupUserComboItem:hover {
   background: transparent;
   color: var(--text);
   min-width: 56px;
+  width: 56px;
   height: 28px;
   padding: 0 10px;
   line-height: 1;
@@ -549,64 +550,90 @@ button.setupUserComboItem:hover {
 
 .shiftHandleColHead,
 .shiftHandleCell {
-  width: 30px;
-  min-width: 30px;
-  max-width: 30px;
-  padding-left: 4px;
-  padding-right: 4px;
+  width: 42px;
+  min-width: 42px;
+  max-width: 42px;
+  padding-left: 6px;
+  padding-right: 6px;
 }
 
 .shiftHandleCell {
   text-align: center;
 }
 
+.shiftsWorkshopTable>tbody>tr {
+  position: relative;
+  transition: background 0.16s ease;
+}
+
+.shiftsWorkshopTable>tbody>tr:not(.shiftDraggingRow):not(.setupDetailsRow):hover>td {
+  background: var(--interactive-bg);
+}
+
 .shiftReorderHandleBtn {
   appearance: none;
-  border: 1px solid var(--interactive-border);
-  border-radius: 6px;
-  background: var(--interactive-bg);
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
   color: var(--muted);
-  width: 18px;
-  height: 28px;
+  width: 28px;
+  height: 32px;
   padding: 0;
   cursor: grab;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  position: relative;
   transition:
+    transform 0.12s ease,
     background 0.12s ease,
-    border-color 0.12s ease,
     color 0.12s ease,
-    box-shadow 0.12s ease;
+    opacity 0.12s ease;
+}
+
+.shiftReorderHandleBtn::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 4px;
+  border-radius: 999px;
+  background: transparent;
+  transition: background 0.12s ease;
 }
 
 .shiftReorderHandleIcon {
-  width: 8px;
-  height: 14px;
-  fill: currentColor;
+  width: 16px;
+  height: 16px;
+  display: block;
+}
+
+.shiftReorderHandleIcon path {
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  fill: none;
   pointer-events: none;
 }
 
 .shiftReorderHandleBtn:focus-visible {
   outline: none;
-  border-color: var(--border-accent-focus);
-  box-shadow: 0 0 0 1px var(--border-accent-focus);
+  box-shadow: var(--focus-ring);
+}
+
+.shiftsWorkshopTable>tbody>tr:hover .shiftReorderHandleBtn::before {
+  background: var(--accent-1);
 }
 
 .shiftReorderHandleBtn:hover {
-  border-color: var(--interactive-border-hover);
-  background: var(--interactive-bg-hover);
+  background: transparent;
   color: var(--text);
-  box-shadow: var(--shadow-soft);
 }
 
-.shiftReorderHandleBtn:active,
-.shiftReorderHandleBtn.active {
+.shiftReorderHandleBtn:active {
   cursor: grabbing;
-  color: #ffffff;
-  border-color: var(--border-accent-medium);
-  background: linear-gradient(180deg, var(--accent-2), var(--accent-3));
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08);
+  transform: scale(0.96);
 }
 
 .shiftReorderHandleBtn:disabled {
@@ -615,16 +642,89 @@ button.setupUserComboItem:hover {
   color: rgba(180, 186, 198, 0.65);
 }
 
-.shiftDragTargetRow td {
-  background: rgba(120, 140, 180, 0.14);
+.shiftDraggingRow {
+  display: none;
 }
 
-.shiftDragTargetRow .shiftHandleCell {
-  box-shadow: inset 3px 0 0 var(--border-accent-medium);
+.shiftReorderPlaceholderRow td {
+  padding: 0;
+  border-bottom-color: transparent;
 }
 
-.shiftDraggingRow td {
-  opacity: 0.82;
+.shiftReorderPlaceholderBox {
+  height: var(--shift-ph-h, 44px);
+  margin: 6px 10px;
+  border-radius: 14px;
+  border: 1px dashed var(--border-accent-focus);
+  background: var(--accent-3);
+  position: relative;
+}
+
+.shiftReorderPlaceholderBox::after {
+  content: 'Drop here';
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--muted);
+  background: var(--surface-0);
+  border: 1px solid var(--interactive-border);
+  padding: 4px 8px;
+  border-radius: 999px;
+}
+
+.shiftReorderGhost {
+  position: fixed;
+  left: 0;
+  top: 0;
+  pointer-events: none;
+  z-index: 1100;
+  border-radius: 14px;
+  border: 1px solid var(--border-accent-focus);
+  background: var(--surface-1);
+  box-shadow:
+    0 16px 36px rgba(0, 0, 0, 0.42),
+    0 0 0 1px var(--accent-2);
+  backdrop-filter: blur(6px);
+  overflow: hidden;
+  animation: shiftGhostPluck 120ms ease-out;
+}
+
+.shiftReorderGhost table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+.shiftReorderGhost td {
+  padding: 9px 8px;
+  border-bottom: 1px solid var(--grid-2);
+}
+
+@keyframes shiftGhostPluck {
+  0% {
+    opacity: 0.74;
+    filter: saturate(0.88);
+  }
+
+  100% {
+    opacity: 1;
+    filter: saturate(1);
+  }
+}
+
+body.teamShiftRowDragging * {
+  user-select: none !important;
+}
+
+body.teamShiftRowDragging {
+  cursor: grabbing;
+}
+
+.shiftReorderHandleBtn {
+  touch-action: none;
 }
 
 .setupDetailsRow td {
@@ -648,6 +748,91 @@ button.setupUserComboItem:hover {
   font-size: 11px;
   color: var(--muted);
   letter-spacing: 0.02em;
+}
+
+.shiftRowShellTable {
+  width: 100%;
+  min-width: 100%;
+  margin: 0;
+  border-collapse: collapse;
+  background: transparent;
+}
+
+.shiftRowShellTable>tbody>tr>td {
+  padding: 0;
+  border-bottom: 0;
+  background: transparent;
+}
+
+.shiftRowShellTable>tbody>tr.shiftRowShellMain>td {
+  padding: 9px 8px;
+}
+
+.shiftRowShellTable>tbody>tr.shiftRowShellDetails>td {
+  padding: 0;
+}
+
+.shiftDetailsSubTable {
+  width: 100%;
+  min-width: 100%;
+  border-collapse: collapse;
+  border-top: 1px solid var(--grid-2);
+  background: transparent;
+}
+
+.shiftDetailsSubTable th,
+.shiftDetailsSubTable td {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.shiftDetailsSubTable tr:last-child td {
+  border-bottom: 0;
+}
+
+.shiftColHandle {
+  width: 42px;
+}
+
+.shiftColName {
+  width: 170px;
+}
+
+.shiftColPattern {
+  width: 150px;
+}
+
+.shiftColStart {
+  width: 120px;
+}
+
+.shiftColEnd {
+  width: 120px;
+}
+
+.shiftColChanges {
+  width: 84px;
+}
+
+.shiftColActions {
+  width: 78px;
+}
+
+.shiftActionsColHead {
+  color: transparent;
+}
+
+.shiftChangesCell {
+  text-align: center;
+}
+
+.shiftChangesNone {
+  display: inline-block;
+  width: 56px;
+  text-align: center;
+}
+
+.shiftActionsCell .btn {
+  min-width: 62px;
 }
 
 .tableSortBtn {
@@ -780,6 +965,144 @@ button.setupUserComboItem:hover {
 
 .eventCodeAvailabilityBtn:hover {
   filter: brightness(1.08);
+}
+
+.eventCodeReminderSection {
+  border: 1px solid var(--interactive-border);
+  border-radius: 10px;
+  background: var(--input-bg);
+  padding: 10px;
+  display: grid;
+  gap: 10px;
+}
+
+.eventCodeReminderTitle {
+  font-size: 12px;
+  font-weight: 850;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.eventCodeReminderPickerStack {
+  display: grid;
+  gap: 8px;
+}
+
+.eventCodeReminderHeaderRow {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr)) 36px;
+  gap: 8px;
+  align-items: end;
+}
+
+.eventCodeReminderHeaderRow span {
+  font-size: 11px;
+  font-weight: 800;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  line-height: 1;
+}
+
+.eventCodeReminderHeaderAction {
+  display: block;
+}
+
+.eventCodeReminderRowWrap {
+  display: flex;
+  gap: 8px;
+  align-items: end;
+}
+
+.eventCodeReminderPickerRow {
+  display: flex;
+  gap: 8px;
+  flex-wrap: nowrap;
+  min-width: 0;
+  width: 100%;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.eventCodeReminderPickerRow .themedSpinPicker {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.eventCodeReminderAddBtn {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-height: 34px;
+  border: 1px dashed var(--interactive-border-hover);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.eventCodeReminderAddBtn:hover {
+  background: var(--interactive-bg-hover);
+}
+
+.eventCodeReminderAddBtn svg {
+  width: 16px;
+  height: 16px;
+  stroke: currentColor;
+  stroke-width: 2.2;
+}
+
+.eventCodeReminderRemoveBtn {
+  appearance: none;
+  width: 36px;
+  height: 36px;
+  border: 1px solid var(--interactive-border);
+  border-radius: 8px;
+  background: var(--input-bg);
+  color: var(--text);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  flex: 0 0 36px;
+  align-self: end;
+  transform: translateY(-1px);
+}
+
+.eventCodeReminderRemoveBtn:hover {
+  background: var(--interactive-bg-hover);
+}
+
+.eventCodeReminderRemoveBtn svg {
+  width: 14px;
+  height: 14px;
+  stroke: currentColor;
+  stroke-width: 2.2;
+  fill: none;
+  stroke-linecap: round;
+}
+
+.eventCodeReminderSummary {
+  display: grid;
+  gap: 4px;
+  justify-items: center;
+  text-align: center;
+  padding: 4px 0 2px;
+}
+
+.eventCodeReminderSummaryTitle {
+  font-size: 12px;
+  font-weight: 820;
+  color: var(--text);
+}
+
+.eventCodeReminderSummaryLine {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--muted);
+  line-height: 1.2;
 }
 
 .eventCodeDescriptionInput {

@@ -293,7 +293,7 @@
 
 .memberEventTextarea {
   width: 100%;
-  min-height: 90px;
+  min-height: 70px;
   resize: vertical;
 }
 
@@ -331,6 +331,119 @@
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
+}
+
+.memberEventReminderSection {
+  border: 1px solid var(--interactive-border);
+  border-radius: 10px;
+  background: var(--input-bg);
+  padding: 10px;
+  display: grid;
+  gap: 10px;
+}
+
+.memberEventReminderHeaderRow {
+  text-align: center;
+}
+
+.memberEventReminderPickerRow {
+  display: flex;
+  gap: 8px;
+  flex-wrap: nowrap;
+  min-width: 0;
+  width: 100%;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.memberEventReminderPickerStack {
+  display: grid;
+  gap: 8px;
+}
+
+.memberEventReminderHeaderRow {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr)) 36px;
+  gap: 8px;
+  align-items: end;
+}
+
+.memberEventReminderHeaderRow span {
+  font-size: 11px;
+  font-weight: 800;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  line-height: 1;
+}
+
+.memberEventReminderHeaderAction {
+  display: block;
+}
+
+.memberEventReminderRowWrap {
+  display: flex;
+  gap: 8px;
+  align-items: end;
+}
+
+.memberEventReminderPickerRow :global(.themedSpinPicker) {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.memberEventReminderAddBtn {
+	min-height: 34px;
+}
+
+.memberEventReminderSummary {
+	display: grid;
+	gap: 4px;
+	justify-items: center;
+	text-align: center;
+	padding: 4px 0 2px;
+}
+
+.memberEventReminderSummaryTitle {
+	font-size: 12px;
+	font-weight: 820;
+	color: var(--text);
+}
+
+.memberEventReminderSummaryLine {
+	font-size: 12px;
+	font-weight: 700;
+	color: var(--muted);
+	line-height: 1.2;
+}
+
+.memberEventReminderRemoveBtn {
+	appearance: none;
+	width: 36px;
+  height: 36px;
+  border: 1px solid var(--interactive-border);
+  border-radius: 8px;
+  background: var(--input-bg);
+  color: var(--text);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  flex: 0 0 36px;
+  align-self: end;
+  transform: translateY(-1px);
+}
+
+.memberEventReminderRemoveBtn:hover {
+  background: var(--interactive-bg-hover);
+}
+
+.memberEventReminderRemoveBtn svg {
+  width: 14px;
+  height: 14px;
+  stroke: currentColor;
+  stroke-width: 2.2;
+  fill: none;
+  stroke-linecap: round;
 }
 
 .memberEventCustomColorField :global(.colorPicker) {
