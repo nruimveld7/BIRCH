@@ -1,0 +1,9 @@
+Schedule Popup Overview
+This popup is your manager control center for schedule-level settings.
+
+From here, you can:
+- Rename the schedule
+- Deactivate a schedule
+- Adjust page and schedule theme colors
+
+Open it by clicking the schedule name in the top-left area of the page.

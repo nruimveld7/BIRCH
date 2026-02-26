@@ -202,12 +202,18 @@
   gap: 12px;
 }
 
-.workshopMonthPickerRow {
+.shiftsMonthPickerRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
   margin-bottom: 12px;
 }
 
-.workshopMonthPickerField {
-  max-width: 260px;
+.shiftsMonthPickerField {
+  flex: 1 1 calc(50% - 6px);
+  min-width: 220px;
+  max-width: none;
 }
 
 .setupGrid label,
@@ -234,29 +240,29 @@
   color: var(--muted);
 }
 
-.workshopDateField {
+.shiftsDateField {
   border: 1px solid transparent;
   border-radius: 10px;
   padding: 10px;
   min-width: 0;
 }
 
-.workshopDateFieldTransparent {
+.shiftsDateFieldTransparent {
   border-color: transparent;
 }
 
-.workshopDateFieldIndefinite {
+.shiftsDateFieldIndefinite {
   border: 1px dashed rgba(160, 160, 160, 0.8);
   background: rgba(120, 120, 120, 0.16);
 }
 
-.workshopDateFieldIndefinite :is(.datePickerBtn, .pickerBtn) {
+.shiftsDateFieldIndefinite :is(.datePickerBtn, .pickerBtn) {
   border-color: rgba(160, 160, 160, 0.85);
   background: rgba(135, 135, 135, 0.18);
   color: rgba(228, 228, 228, 0.95);
 }
 
-.workshopDateFieldIndefinite :is(.datePickerBtn, .pickerBtn):hover {
+.shiftsDateFieldIndefinite :is(.datePickerBtn, .pickerBtn):hover {
   border-color: rgba(180, 180, 180, 0.95);
   background: rgba(145, 145, 145, 0.26);
 }
@@ -396,6 +402,10 @@
 }
 
 .setupUserCombo:focus-within {
+  z-index: 220;
+}
+
+.setupUserCombo[aria-expanded='true'] {
   z-index: 220;
 }
 
@@ -561,13 +571,23 @@ button.setupUserComboItem:hover {
   text-align: center;
 }
 
-.shiftsWorkshopTable>tbody>tr {
+.shiftsTimelineTable>tbody>tr {
   position: relative;
   transition: background 0.16s ease;
 }
 
-.shiftsWorkshopTable>tbody>tr:not(.shiftDraggingRow):not(.setupDetailsRow):hover>td {
+.shiftsTimelineTable>tbody>tr:not(.shiftDraggingRow):not(.setupDetailsRow):hover>td {
   background: var(--interactive-bg);
+}
+
+.shiftsTimelineTable>tbody>tr.shiftReorderDropTarget:not(.shiftDraggingRow):not(.setupDetailsRow)>td {
+  background: var(--interactive-bg);
+}
+
+.shiftsTimelineTable>tbody>tr.shiftReorderDropTarget:not(.shiftDraggingRow):not(.setupDetailsRow) {
+  box-shadow:
+    inset 0 1px 0 var(--border-accent-focus),
+    inset 0 -1px 0 var(--border-accent-focus);
 }
 
 .shiftReorderHandleBtn {
@@ -622,7 +642,7 @@ button.setupUserComboItem:hover {
   box-shadow: var(--focus-ring);
 }
 
-.shiftsWorkshopTable>tbody>tr:hover .shiftReorderHandleBtn::before {
+.shiftsTimelineTable>tbody>tr:hover .shiftReorderHandleBtn::before {
   background: var(--accent-1);
 }
 
@@ -883,6 +903,72 @@ body.teamShiftRowDragging {
   margin-top: 10px;
   color: var(--muted);
   font-size: 13px;
+}
+
+.assignmentShiftMenu {
+  margin-top: 8px;
+}
+
+.assignmentShiftMenuHint {}
+
+.assignmentShiftMenuGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+.assignmentShiftMenuBtn {
+  appearance: none;
+  border: 1px solid var(--interactive-border);
+  border-radius: 10px;
+  background: var(--interactive-bg);
+  color: var(--text);
+  cursor: pointer;
+  padding: 10px 12px;
+  min-height: 42px;
+  text-align: center;
+  font-weight: 780;
+}
+
+.assignmentShiftMenuBtn:hover {
+  background: var(--interactive-bg-hover);
+  border-color: var(--interactive-border-hover);
+}
+
+.assignmentTableToolbar {
+  margin-top: 8px;
+  margin-bottom: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 12px;
+}
+
+.assignmentBackBtn {
+  appearance: none;
+  border: 1px solid var(--interactive-border);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  padding: 8px 12px;
+  min-height: 38px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 760;
+}
+
+.assignmentBackBtn:hover {
+  background: var(--interactive-bg-hover);
+  border-color: var(--interactive-border-hover);
+}
+
+.assignmentTableShiftLabel {
+  flex: 1;
+  color: var(--muted);
+  font-weight: 760;
+  text-align: center;
 }
 
 .eventCodeInline {
@@ -1635,6 +1721,24 @@ body.teamShiftRowDragging {
   box-shadow: none;
 }
 
+:root[data-theme='light'] .managerThemeDefaultBtn:disabled,
+:root[data-theme='light'] .managerThemeDefaultBtn[disabled] {
+  opacity: 0.45;
+  cursor: not-allowed;
+  background: rgba(128, 132, 142, 0.18);
+  border-color: rgba(128, 132, 142, 0.45);
+  color: rgba(205, 210, 220, 0.62);
+  box-shadow: none;
+}
+
+:root[data-theme='light'] .managerThemeDefaultBtn:disabled:hover,
+:root[data-theme='light'] .managerThemeDefaultBtn[disabled]:hover {
+  background: rgba(128, 132, 142, 0.18);
+  border-color: rgba(128, 132, 142, 0.45);
+  color: rgba(205, 210, 220, 0.62);
+  box-shadow: none;
+}
+
 .managerThemeRevertBtn {
   margin-left: 0;
 }
@@ -1643,6 +1747,24 @@ body.teamShiftRowDragging {
 .managerThemeRevertBtn[disabled] {
   opacity: 0.45;
   cursor: not-allowed;
+  background: rgba(128, 132, 142, 0.18);
+  border-color: rgba(128, 132, 142, 0.45);
+  color: rgba(205, 210, 220, 0.62);
+  box-shadow: none;
+}
+
+:root[data-theme='light'] .managerThemeRevertBtn:disabled,
+:root[data-theme='light'] .managerThemeRevertBtn[disabled] {
+  opacity: 0.45;
+  cursor: not-allowed;
+  background: rgba(128, 132, 142, 0.18);
+  border-color: rgba(128, 132, 142, 0.45);
+  color: rgba(205, 210, 220, 0.62);
+  box-shadow: none;
+}
+
+:root[data-theme='light'] .managerThemeRevertBtn:disabled:hover,
+:root[data-theme='light'] .managerThemeRevertBtn[disabled]:hover {
   background: rgba(128, 132, 142, 0.18);
   border-color: rgba(128, 132, 142, 0.45);
   color: rgba(205, 210, 220, 0.62);
@@ -1703,6 +1825,15 @@ body.teamShiftRowDragging {
   width: 124px;
   position: relative;
   z-index: 1;
+}
+
+.managerThemeTable tbody td[colspan='2'] {
+  width: auto;
+}
+
+.managerThemeSettingDivider,
+.managerThemeColorCell {
+  border-left: 1px solid var(--grid-2);
 }
 
 .managerThemeTable tbody td:has(.colorPickerPopover) {
@@ -1772,8 +1903,28 @@ body.teamShiftRowDragging {
   filter: none;
 }
 
+:root[data-theme='light'] .managerSaveBtn:disabled,
+:root[data-theme='light'] .managerSaveBtn[disabled] {
+  opacity: 0.45;
+  cursor: not-allowed;
+  background: rgba(128, 132, 142, 0.18);
+  border-color: rgba(128, 132, 142, 0.45);
+  color: rgba(205, 210, 220, 0.62);
+  box-shadow: none;
+  filter: none;
+}
+
 .managerSaveBtn:disabled:hover,
 .managerSaveBtn[disabled]:hover {
+  background: rgba(128, 132, 142, 0.18);
+  border-color: rgba(128, 132, 142, 0.45);
+  color: rgba(205, 210, 220, 0.62);
+  box-shadow: none;
+  filter: none;
+}
+
+:root[data-theme='light'] .managerSaveBtn:disabled:hover,
+:root[data-theme='light'] .managerSaveBtn[disabled]:hover {
   background: rgba(128, 132, 142, 0.18);
   border-color: rgba(128, 132, 142, 0.45);
   color: rgba(205, 210, 220, 0.62);
@@ -1851,6 +2002,16 @@ body.teamShiftRowDragging {
   border-color: var(--interactive-border-hover);
 }
 
+.iconSquareBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.iconSquareBtn:disabled:hover {
+  background: var(--interactive-bg);
+  border-color: var(--interactive-border);
+}
+
 .iconSquareBtn svg {
   width: 16px;
   height: 16px;
@@ -1914,8 +2075,8 @@ body.teamShiftRowDragging {
 }
 
 .iconActionBtn svg {
-  width: 14px;
-  height: 14px;
+  width: 15px;
+  height: 15px;
   stroke: currentColor;
   stroke-width: 2.1;
   fill: none;
@@ -2051,5 +2212,14 @@ body.team-modal-open {
 
   .setupShiftSecondaryFields {
     grid-template-columns: 1fr;
+  }
+
+  .assignmentTableToolbar {
+    flex-wrap: wrap;
+  }
+
+  .assignmentTableShiftLabel {
+    width: 100%;
+    text-align: left;
   }
 }

@@ -1,0 +1,7 @@
+Displaying Scheduled Events
+Scheduled events appear directly in the schedule when events are present.
+
+Hover over an event indicator to view event details.
+If no events are configured for the current period, this area may appear empty.
+
+Events may appear as different coloration of the assignment on the affected date, or as a badge as shown.

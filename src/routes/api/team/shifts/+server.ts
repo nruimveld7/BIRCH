@@ -20,10 +20,11 @@ type VersionRow = {
 	Name: string;
 	PatternId: number | null;
 	DisplayOrder: number | null;
+	ModifiedAt?: Date | string | null;
 };
 
 type ShiftRow = {
-	EmployeeTypeId: number;
+	ShiftId: number;
 	Name: string;
 	PatternId: number | null;
 	PatternName: string | null;
@@ -36,9 +37,21 @@ type RemoveShiftPayload = {
 	editMode?: unknown;
 	changeStartDate?: unknown;
 	confirmUsedShiftRemoval?: unknown;
+	expectedShiftVersionStamp?: unknown;
+	expectedChangeVersionStamp?: unknown;
 };
 
 const CASE_SENSITIVE_COLLATION = 'Latin1_General_100_CS_AS';
+const SHIFT_REORDER_SERVER_DEBUG = true;
+
+function logShiftReorderServer(message: string, details?: Record<string, unknown>) {
+	if (!SHIFT_REORDER_SERVER_DEBUG) return;
+	if (details) {
+		console.info(`[ShiftReorderServer] ${message}`, details);
+		return;
+	}
+	console.info(`[ShiftReorderServer] ${message}`);
+}
 
 function req(runner: sql.ConnectionPool | sql.Transaction): sql.Request {
 	// mssql types do not accept a union argument, but both pool and transaction are valid at runtime.
@@ -98,7 +111,18 @@ function cleanBoolean(value: unknown): boolean {
 	return value === true;
 }
 
-function cleanEmployeeTypeId(value: unknown): number {
+function cleanRequiredVersionStamp(value: unknown, label: string): string {
+	if (typeof value !== 'string') {
+		throw error(400, `${label} is required`);
+	}
+	const trimmed = value.trim();
+	if (!trimmed) {
+		throw error(400, `${label} is required`);
+	}
+	return trimmed.slice(0, 200);
+}
+
+function cleanShiftId(value: unknown): number {
 	const parsed = Number(value);
 	if (!Number.isInteger(parsed) || parsed <= 0) {
 		throw error(400, 'Shift ID is required');
@@ -106,16 +130,16 @@ function cleanEmployeeTypeId(value: unknown): number {
 	return parsed;
 }
 
-function cleanEmployeeTypeIdList(value: unknown): number[] {
+function cleanShiftIdList(value: unknown): number[] {
 	if (!Array.isArray(value) || value.length === 0) {
-		throw error(400, 'orderedEmployeeTypeIds is required');
+		throw error(400, 'orderedShiftIds is required');
 	}
 	const parsed = value.map((entry) => Number(entry));
 	if (parsed.some((entry) => !Number.isInteger(entry) || entry <= 0)) {
-		throw error(400, 'orderedEmployeeTypeIds must contain valid shift IDs');
+		throw error(400, 'orderedShiftIds must contain valid shift IDs');
 	}
 	if (new Set(parsed).size !== parsed.length) {
-		throw error(400, 'orderedEmployeeTypeIds contains duplicates');
+		throw error(400, 'orderedShiftIds contains duplicates');
 	}
 	return parsed;
 }
@@ -125,6 +149,30 @@ function toDateOnly(value: Date | string | null | undefined): string | null {
 	if (value instanceof Date) return value.toISOString().slice(0, 10);
 	if (typeof value === 'string') return value.slice(0, 10);
 	return null;
+}
+
+function toDateTimeIso(value: Date | string | null | undefined): string | null {
+	if (!value) return null;
+	if (value instanceof Date) return value.toISOString();
+	if (typeof value !== 'string') return null;
+	const parsed = new Date(value);
+	if (Number.isNaN(parsed.getTime())) return null;
+	return parsed.toISOString();
+}
+
+function versionStampForVersion(startDate: string, modifiedAtIso: string | null): string {
+	return `${startDate}|${modifiedAtIso ?? '0'}`;
+}
+
+function shiftVersionStampForVersions(
+	versions: Array<{ startDate: string; modifiedAtIso: string | null }>
+): string {
+	const latestModifiedAtIso = versions.reduce<string | null>((latest, version) => {
+		if (!version.modifiedAtIso) return latest;
+		if (!latest || version.modifiedAtIso > latest) return version.modifiedAtIso;
+		return latest;
+	}, null);
+	return `${versions.length}|${latestModifiedAtIso ?? '0'}`;
 }
 
 function toSqlDateValue(dateOnly: string): Date {
@@ -235,14 +283,14 @@ async function ensureShiftExists(
 		.input('scheduleId', scheduleId)
 		.input('employeeTypeId', employeeTypeId)
 		.query(
-			`SELECT TOP (1) EmployeeTypeId
-			 FROM dbo.EmployeeTypes
+			`SELECT TOP (1) ShiftId
+			 FROM dbo.Shifts
 			 WHERE ScheduleId = @scheduleId
-			   AND EmployeeTypeId = @employeeTypeId
+			   AND ShiftId = @employeeTypeId
 			   AND IsActive = 1
 			   AND DeletedAt IS NULL;`
 		);
-	if (!result.recordset?.[0]?.EmployeeTypeId) {
+	if (!result.recordset?.[0]?.ShiftId) {
 		throw error(404, 'Shift not found');
 	}
 }
@@ -253,19 +301,19 @@ async function assertNoNameOverlap(params: {
 	name: string;
 	startDate: string;
 	endDate: string | null;
-	excludeEmployeeTypeId?: number | null;
+	excludeShiftId?: number | null;
 }) {
 	const overlap = await req(params.runner)
 		.input('scheduleId', params.scheduleId)
 		.input('name', params.name)
 		.input('startDate', sql.Date, toSqlDateValue(params.startDate))
 		.input('endDate', sql.Date, toNullableSqlDateValue(params.endDate))
-		.input('excludeEmployeeTypeId', params.excludeEmployeeTypeId ?? null)
+		.input('excludeShiftId', params.excludeShiftId ?? null)
 		.query(
-			`SELECT TOP (1) etv.EmployeeTypeId
-			 FROM dbo.EmployeeTypeVersions etv
-			 INNER JOIN dbo.EmployeeTypes et
-			   ON et.EmployeeTypeId = etv.EmployeeTypeId
+			`SELECT TOP (1) etv.ShiftId
+			 FROM dbo.ShiftEdits etv
+			 INNER JOIN dbo.Shifts et
+			   ON et.ShiftId = etv.ShiftId
 			  AND et.ScheduleId = etv.ScheduleId
 			  AND et.IsActive = 1
 			  AND et.DeletedAt IS NULL
@@ -275,10 +323,10 @@ async function assertNoNameOverlap(params: {
 			   AND etv.Name COLLATE ${CASE_SENSITIVE_COLLATION} = @name COLLATE ${CASE_SENSITIVE_COLLATION}
 			   AND etv.StartDate <= ISNULL(@endDate, '9999-12-31')
 			   AND ISNULL(etv.EndDate, '9999-12-31') >= @startDate
-			   AND (@excludeEmployeeTypeId IS NULL OR etv.EmployeeTypeId <> @excludeEmployeeTypeId);`
+			   AND (@excludeShiftId IS NULL OR etv.ShiftId <> @excludeShiftId);`
 		);
 
-	if (overlap.recordset?.[0]?.EmployeeTypeId) {
+	if (overlap.recordset?.[0]?.ShiftId) {
 		throw error(409, 'A shift with this name is already active during the selected timespan');
 	}
 }
@@ -287,25 +335,40 @@ async function loadVersions(
 	runner: sql.ConnectionPool | sql.Transaction,
 	scheduleId: number,
 	employeeTypeId: number
-): Promise<Array<{ startDate: string; endDate: string | null; name: string; patternId: number | null }>> {
+): Promise<
+	Array<{
+		startDate: string;
+		endDate: string | null;
+		name: string;
+		patternId: number | null;
+		modifiedAtIso: string | null;
+		versionStamp: string;
+	}>
+> {
 	const result = await req(runner)
 		.input('scheduleId', scheduleId)
 		.input('employeeTypeId', employeeTypeId)
 		.query(
-			`SELECT StartDate, EndDate, Name, PatternId
-			 FROM dbo.EmployeeTypeVersions
+			`SELECT StartDate, EndDate, Name, PatternId, COALESCE(UpdatedAt, CreatedAt) AS ModifiedAt
+			 FROM dbo.ShiftEdits
 			 WHERE ScheduleId = @scheduleId
-			   AND EmployeeTypeId = @employeeTypeId
+			   AND ShiftId = @employeeTypeId
 			   AND IsActive = 1
 			   AND DeletedAt IS NULL
 			 ORDER BY StartDate ASC;`
 		);
-	return (result.recordset as VersionRow[]).map((row) => ({
-		startDate: toDateOnly(row.StartDate) ?? '',
-		endDate: toDateOnly(row.EndDate),
-		name: row.Name,
-		patternId: row.PatternId === null ? null : Number(row.PatternId)
-	}));
+	return (result.recordset as VersionRow[]).map((row) => {
+		const startDate = toDateOnly(row.StartDate) ?? '';
+		const modifiedAtIso = toDateTimeIso(row.ModifiedAt);
+		return {
+			startDate,
+			endDate: toDateOnly(row.EndDate),
+			name: row.Name,
+			patternId: row.PatternId === null ? null : Number(row.PatternId),
+			modifiedAtIso,
+			versionStamp: versionStampForVersion(startDate, modifiedAtIso)
+		};
+	});
 }
 
 async function replaceVersions(params: {
@@ -319,9 +382,9 @@ async function replaceVersions(params: {
 		.input('scheduleId', params.scheduleId)
 		.input('employeeTypeId', params.employeeTypeId)
 		.query(
-			`DELETE FROM dbo.EmployeeTypeVersions
+			`DELETE FROM dbo.ShiftEdits
 			 WHERE ScheduleId = @scheduleId
-			   AND EmployeeTypeId = @employeeTypeId;`
+			   AND ShiftId = @employeeTypeId;`
 		);
 
 	for (const version of params.versions) {
@@ -334,9 +397,9 @@ async function replaceVersions(params: {
 			.input('patternId', version.patternId)
 			.input('actorOid', params.actorOid)
 			.query(
-				`INSERT INTO dbo.EmployeeTypeVersions (
+				`INSERT INTO dbo.ShiftEdits (
 					ScheduleId,
-					EmployeeTypeId,
+					ShiftId,
 					StartDate,
 					EndDate,
 					Name,
@@ -371,14 +434,14 @@ async function syncShiftMainFromVersions(params: {
 			.input('employeeTypeId', params.employeeTypeId)
 			.input('actorOid', params.actorOid)
 			.query(
-				`UPDATE dbo.EmployeeTypes
+				`UPDATE dbo.Shifts
 				 SET IsActive = 0,
 					 DeletedAt = SYSUTCDATETIME(),
 					 DeletedBy = @actorOid,
 					 UpdatedAt = SYSUTCDATETIME(),
 					 UpdatedBy = @actorOid
 				 WHERE ScheduleId = @scheduleId
-				   AND EmployeeTypeId = @employeeTypeId;`
+				   AND ShiftId = @employeeTypeId;`
 			);
 		return;
 	}
@@ -401,7 +464,7 @@ async function syncShiftMainFromVersions(params: {
 		.input('endDate', sql.Date, toNullableSqlDateValue(hasOpenEnded ? null : latestClosedEnd))
 		.input('actorOid', params.actorOid)
 		.query(
-			`UPDATE dbo.EmployeeTypes
+			`UPDATE dbo.Shifts
 			 SET Name = @name,
 				 PatternId = @patternId,
 				 StartDate = @startDate,
@@ -412,7 +475,7 @@ async function syncShiftMainFromVersions(params: {
 				 UpdatedAt = SYSUTCDATETIME(),
 				 UpdatedBy = @actorOid
 			 WHERE ScheduleId = @scheduleId
-			   AND EmployeeTypeId = @employeeTypeId;`
+			   AND ShiftId = @employeeTypeId;`
 		);
 }
 
@@ -463,19 +526,19 @@ async function cleanupShiftScopedDataAfterEndDate(params: {
 		.input('endDate', sql.Date, toSqlDateValue(params.endDate))
 		.input('actorOid', params.actorOid)
 		.query(
-			`DELETE FROM dbo.ScheduleUserTypes
+			`DELETE FROM dbo.ScheduleAssignments
 			 WHERE ScheduleId = @scheduleId
-			   AND EmployeeTypeId = @employeeTypeId
+			   AND ShiftId = @employeeTypeId
 			   AND IsActive = 1
 			   AND DeletedAt IS NULL
 			   AND StartDate > @endDate;
 
-			 UPDATE dbo.ScheduleUserTypes
+			 UPDATE dbo.ScheduleAssignments
 			 SET EndDate = @endDate,
 				 EndedAt = SYSUTCDATETIME(),
 				 EndedBy = @actorOid
 			 WHERE ScheduleId = @scheduleId
-			   AND EmployeeTypeId = @employeeTypeId
+			   AND ShiftId = @employeeTypeId
 			   AND IsActive = 1
 			   AND DeletedAt IS NULL
 			   AND StartDate <= @endDate
@@ -483,7 +546,7 @@ async function cleanupShiftScopedDataAfterEndDate(params: {
 
 			 DELETE FROM dbo.ScheduleEvents
 			 WHERE ScheduleId = @scheduleId
-			   AND EmployeeTypeId = @employeeTypeId
+			   AND ShiftId = @employeeTypeId
 			   AND IsActive = 1
 			   AND DeletedAt IS NULL
 			   AND StartDate > @endDate;
@@ -491,25 +554,25 @@ async function cleanupShiftScopedDataAfterEndDate(params: {
 			 UPDATE dbo.ScheduleEvents
 			 SET EndDate = @endDate
 			 WHERE ScheduleId = @scheduleId
-			   AND EmployeeTypeId = @employeeTypeId
+			   AND ShiftId = @employeeTypeId
 			   AND IsActive = 1
 			   AND DeletedAt IS NULL
 			   AND StartDate <= @endDate
 			   AND EndDate > @endDate;
 
-			 DELETE FROM dbo.EmployeeTypeVersions
+			 DELETE FROM dbo.ShiftEdits
 			 WHERE ScheduleId = @scheduleId
-			   AND EmployeeTypeId = @employeeTypeId
+			   AND ShiftId = @employeeTypeId
 			   AND IsActive = 1
 			   AND DeletedAt IS NULL
 			   AND StartDate > @endDate;
 
-			 UPDATE dbo.EmployeeTypeVersions
+			 UPDATE dbo.ShiftEdits
 			 SET EndDate = @endDate,
 				 UpdatedAt = SYSUTCDATETIME(),
 				 UpdatedBy = @actorOid
 			 WHERE ScheduleId = @scheduleId
-			   AND EmployeeTypeId = @employeeTypeId
+			   AND ShiftId = @employeeTypeId
 			   AND IsActive = 1
 			   AND DeletedAt IS NULL
 			   AND StartDate <= @endDate
@@ -528,10 +591,10 @@ async function getFallbackOrderedShiftIdsForMonth(params: {
 		.input('monthStart', params.monthStart)
 		.input('monthEnd', monthEnd)
 		.query(
-			`SELECT DISTINCT et.EmployeeTypeId, et.DisplayOrder, et.Name
-			 FROM dbo.EmployeeTypes et
-			 INNER JOIN dbo.EmployeeTypeVersions etv
-			   ON etv.EmployeeTypeId = et.EmployeeTypeId
+			`SELECT DISTINCT et.ShiftId, et.DisplayOrder, et.Name
+			 FROM dbo.Shifts et
+			 INNER JOIN dbo.ShiftEdits etv
+			   ON etv.ShiftId = et.ShiftId
 			  AND etv.ScheduleId = et.ScheduleId
 			  AND etv.IsActive = 1
 			  AND etv.DeletedAt IS NULL
@@ -540,9 +603,9 @@ async function getFallbackOrderedShiftIdsForMonth(params: {
 			 WHERE et.ScheduleId = @scheduleId
 			   AND et.IsActive = 1
 			   AND et.DeletedAt IS NULL
-			 ORDER BY et.DisplayOrder ASC, et.Name ASC, et.EmployeeTypeId ASC;`
+			 ORDER BY et.DisplayOrder ASC, et.Name ASC, et.ShiftId ASC;`
 		);
-	return (result.recordset as Array<{ EmployeeTypeId: number }>).map((row) => Number(row.EmployeeTypeId));
+	return (result.recordset as Array<{ ShiftId: number }>).map((row) => Number(row.ShiftId));
 }
 
 async function registerAppendShiftOrderForMonth(params: {
@@ -582,6 +645,175 @@ async function registerAppendShiftOrderForMonth(params: {
 		orderedShiftIds: next,
 		actorOid: params.actorOid
 	});
+}
+
+async function registerReplaceShiftOrderForMonth(params: {
+	runner: sql.ConnectionPool | sql.Transaction;
+	scheduleId: number;
+	monthStart: string;
+	fromShiftId: number;
+	toShiftId: number;
+	preferredIndex?: number;
+	actorOid: string;
+}) {
+	const activeShiftIds = await getActiveShiftIdsForMonth({
+		runner: params.runner,
+		scheduleId: params.scheduleId,
+		monthStart: params.monthStart
+	});
+	if (!activeShiftIds.includes(params.toShiftId)) {
+		return;
+	}
+
+	const fallbackOrderedIds = await getFallbackOrderedShiftIdsForMonth({
+		runner: params.runner,
+		scheduleId: params.scheduleId,
+		monthStart: params.monthStart
+	});
+	const resolved = await resolveShiftOrderForMonth({
+		runner: params.runner,
+		scheduleId: params.scheduleId,
+		monthStart: params.monthStart,
+		activeShiftIds,
+		fallbackOrderedIds
+	});
+
+	const monthRow = await req(params.runner)
+		.input('scheduleId', params.scheduleId)
+		.input('monthStart', sql.Date, toSqlDateValue(params.monthStart))
+		.query(
+			`SELECT TOP (1) EffectiveMonth
+			 FROM dbo.ScheduleShiftOrders
+			 WHERE ScheduleId = @scheduleId
+			   AND EffectiveMonth <= @monthStart
+			 ORDER BY EffectiveMonth DESC;`
+		);
+	const anchorMonth = monthRow.recordset?.[0]?.EffectiveMonth as Date | string | undefined;
+	let anchorOrder: number[] = [];
+	if (anchorMonth) {
+		const rows = await req(params.runner)
+			.input('scheduleId', params.scheduleId)
+			.input('effectiveMonth', sql.Date, new Date(anchorMonth))
+			.query(
+				`SELECT ShiftId
+				 FROM dbo.ScheduleShiftOrders
+				 WHERE ScheduleId = @scheduleId
+				   AND EffectiveMonth = @effectiveMonth
+				 ORDER BY DisplayOrder ASC, ShiftId ASC;`
+			);
+		anchorOrder = (rows.recordset as Array<{ ShiftId: number }>).map((row) => Number(row.ShiftId));
+	}
+
+	const next = resolved.filter((id) => id !== params.toShiftId);
+	const anchorIndex = anchorOrder.indexOf(params.fromShiftId);
+	if (anchorIndex >= 0 && anchorIndex <= next.length) {
+		next.splice(anchorIndex, 0, params.toShiftId);
+	} else if (
+		typeof params.preferredIndex === 'number' &&
+		Number.isInteger(params.preferredIndex) &&
+		params.preferredIndex >= 0 &&
+		params.preferredIndex <= next.length
+	) {
+		next.splice(params.preferredIndex, 0, params.toShiftId);
+	} else {
+		next.push(params.toShiftId);
+	}
+
+	await upsertShiftOrderSnapshot({
+		runner: params.runner,
+		scheduleId: params.scheduleId,
+		monthStart: params.monthStart,
+		orderedShiftIds: next,
+		actorOid: params.actorOid
+	});
+}
+
+async function copyShiftDisplayOrder(params: {
+	runner: sql.ConnectionPool | sql.Transaction;
+	scheduleId: number;
+	fromShiftId: number;
+	toShiftId: number;
+	actorOid: string;
+}) {
+	await req(params.runner)
+		.input('scheduleId', params.scheduleId)
+		.input('fromShiftId', params.fromShiftId)
+		.input('toShiftId', params.toShiftId)
+		.input('actorOid', params.actorOid)
+		.query(
+			`UPDATE dst
+			 SET dst.DisplayOrder = src.DisplayOrder,
+				 dst.UpdatedAt = SYSUTCDATETIME(),
+				 dst.UpdatedBy = @actorOid
+			 FROM dbo.Shifts dst
+			 INNER JOIN dbo.Shifts src
+			   ON src.ScheduleId = dst.ScheduleId
+			  AND src.ShiftId = @fromShiftId
+			 WHERE dst.ScheduleId = @scheduleId
+			   AND dst.ShiftId = @toShiftId;`
+		);
+}
+
+async function replaceShiftInFutureOrderSnapshots(params: {
+	runner: sql.ConnectionPool | sql.Transaction;
+	scheduleId: number;
+	monthStart: string;
+	fromShiftId: number;
+	toShiftId: number;
+	actorOid: string;
+}) {
+	await req(params.runner)
+		.input('scheduleId', params.scheduleId)
+		.input('monthStart', sql.Date, toSqlDateValue(params.monthStart))
+		.input('fromShiftId', params.fromShiftId)
+		.input('toShiftId', params.toShiftId)
+		.input('actorOid', params.actorOid)
+		.query(
+			`DELETE target
+			 FROM dbo.ScheduleShiftOrders target
+			 WHERE target.ScheduleId = @scheduleId
+			   AND target.EffectiveMonth >= @monthStart
+			   AND target.ShiftId = @toShiftId
+			   AND EXISTS (
+					SELECT 1
+					FROM dbo.ScheduleShiftOrders prior
+					WHERE prior.ScheduleId = target.ScheduleId
+					  AND prior.EffectiveMonth = target.EffectiveMonth
+					  AND prior.ShiftId = @fromShiftId
+			   );
+
+			 UPDATE dbo.ScheduleShiftOrders
+			 SET ShiftId = @toShiftId,
+				 UpdatedAt = SYSUTCDATETIME(),
+				 UpdatedBy = @actorOid
+			 WHERE ScheduleId = @scheduleId
+			   AND EffectiveMonth >= @monthStart
+			   AND ShiftId = @fromShiftId;
+
+			 WITH Ordered AS (
+				SELECT
+					ScheduleId,
+					EffectiveMonth,
+					ShiftId,
+					ROW_NUMBER() OVER (
+						PARTITION BY ScheduleId, EffectiveMonth
+						ORDER BY DisplayOrder ASC, ShiftId ASC
+					) AS NextDisplayOrder
+				FROM dbo.ScheduleShiftOrders
+				WHERE ScheduleId = @scheduleId
+				  AND EffectiveMonth >= @monthStart
+			 )
+			 UPDATE sso
+			 SET DisplayOrder = o.NextDisplayOrder,
+				 UpdatedAt = SYSUTCDATETIME(),
+				 UpdatedBy = @actorOid
+			 FROM dbo.ScheduleShiftOrders sso
+			 INNER JOIN Ordered o
+			   ON o.ScheduleId = sso.ScheduleId
+			  AND o.EffectiveMonth = sso.EffectiveMonth
+			  AND o.ShiftId = sso.ShiftId
+			 WHERE sso.DisplayOrder <> o.NextDisplayOrder;`
+		);
 }
 
 async function registerRemoveShiftOrderForMonth(params: {
@@ -639,15 +871,15 @@ async function createOrReinstateShift(params: {
 		.input('scheduleId', params.scheduleId)
 		.input('name', params.name)
 		.query(
-			`SELECT TOP (1) EmployeeTypeId
-			 FROM dbo.EmployeeTypes
+			`SELECT TOP (1) ShiftId
+			 FROM dbo.Shifts
 			 WHERE ScheduleId = @scheduleId
 			   AND Name COLLATE ${CASE_SENSITIVE_COLLATION} = @name COLLATE ${CASE_SENSITIVE_COLLATION}
 			   AND (IsActive = 0 OR DeletedAt IS NOT NULL)
-			 ORDER BY DeletedAt DESC, EmployeeTypeId DESC;`
+			 ORDER BY DeletedAt DESC, ShiftId DESC;`
 		);
 
-	let employeeTypeId = Number(softDeleted.recordset?.[0]?.EmployeeTypeId ?? 0);
+	let employeeTypeId = Number(softDeleted.recordset?.[0]?.ShiftId ?? 0);
 	if (employeeTypeId > 0) {
 		await req(params.tx)
 			.input('scheduleId', params.scheduleId)
@@ -658,7 +890,7 @@ async function createOrReinstateShift(params: {
 			.input('endDate', sql.Date, toNullableSqlDateValue(params.endDate))
 			.input('actorOid', params.actorOid)
 			.query(
-				`UPDATE dbo.EmployeeTypes
+				`UPDATE dbo.Shifts
 				 SET Name = @name,
 					 PatternId = @patternId,
 					 StartDate = @startDate,
@@ -669,16 +901,16 @@ async function createOrReinstateShift(params: {
 					 UpdatedAt = SYSUTCDATETIME(),
 					 UpdatedBy = @actorOid
 				 WHERE ScheduleId = @scheduleId
-				   AND EmployeeTypeId = @employeeTypeId;`
+				   AND ShiftId = @employeeTypeId;`
 			);
 
 		await req(params.tx)
 			.input('scheduleId', params.scheduleId)
 			.input('employeeTypeId', employeeTypeId)
 			.query(
-				`DELETE FROM dbo.EmployeeTypeVersions
+				`DELETE FROM dbo.ShiftEdits
 				 WHERE ScheduleId = @scheduleId
-				   AND EmployeeTypeId = @employeeTypeId;`
+				   AND ShiftId = @employeeTypeId;`
 			);
 	} else {
 		const inserted = await req(params.tx)
@@ -689,7 +921,7 @@ async function createOrReinstateShift(params: {
 			.input('endDate', sql.Date, toNullableSqlDateValue(params.endDate))
 			.input('actorOid', params.actorOid)
 			.query(
-				`INSERT INTO dbo.EmployeeTypes (
+				`INSERT INTO dbo.Shifts (
 					ScheduleId,
 					Name,
 					PatternId,
@@ -698,7 +930,7 @@ async function createOrReinstateShift(params: {
 					DisplayOrder,
 					CreatedBy
 				)
-				OUTPUT inserted.EmployeeTypeId AS EmployeeTypeId
+				OUTPUT inserted.ShiftId AS ShiftId
 				VALUES (
 					@scheduleId,
 					@name,
@@ -709,7 +941,7 @@ async function createOrReinstateShift(params: {
 					@actorOid
 				);`
 			);
-		employeeTypeId = Number(inserted.recordset?.[0]?.EmployeeTypeId ?? 0);
+		employeeTypeId = Number(inserted.recordset?.[0]?.ShiftId ?? 0);
 	}
 
 	if (!employeeTypeId) {
@@ -744,8 +976,8 @@ async function createOrReinstateShift(params: {
 async function moveShiftScopedDataFromDate(params: {
 	tx: sql.Transaction;
 	scheduleId: number;
-	fromEmployeeTypeId: number;
-	toEmployeeTypeId: number;
+	fromShiftId: number;
+	toShiftId: number;
 	effectiveStartDate: string;
 	actorOid: string;
 }) {
@@ -753,72 +985,79 @@ async function moveShiftScopedDataFromDate(params: {
 
 	await req(params.tx)
 		.input('scheduleId', params.scheduleId)
-		.input('fromEmployeeTypeId', params.fromEmployeeTypeId)
-		.input('toEmployeeTypeId', params.toEmployeeTypeId)
+		.input('fromShiftId', params.fromShiftId)
+		.input('toShiftId', params.toShiftId)
 		.input('effectiveStartDate', sql.Date, toSqlDateValue(params.effectiveStartDate))
 		.input('splitDateEnd', sql.Date, toSqlDateValue(splitDateEnd))
 		.input('actorOid', params.actorOid)
 		.query(
-			`UPDATE dbo.ScheduleUserTypes
-			 SET EmployeeTypeId = @toEmployeeTypeId
+			`UPDATE dbo.ScheduleAssignments
+			 SET ShiftId = @toShiftId
 			 WHERE ScheduleId = @scheduleId
-			   AND EmployeeTypeId = @fromEmployeeTypeId
+			   AND ShiftId = @fromShiftId
 			   AND StartDate >= @effectiveStartDate
 			   AND IsActive = 1
 			   AND DeletedAt IS NULL;
 
 			 DECLARE @AssignmentSplits TABLE (
 				UserOid nvarchar(64) NOT NULL,
-				EndDate date NULL,
-				DisplayOrder int NOT NULL
+				EndDate date NULL
 			 );
 
-			 INSERT INTO @AssignmentSplits (UserOid, EndDate, DisplayOrder)
-			 SELECT sut.UserOid, sut.EndDate, sut.DisplayOrder
-			 FROM dbo.ScheduleUserTypes sut
+			 INSERT INTO @AssignmentSplits (UserOid, EndDate)
+			 SELECT sut.UserOid, sut.EndDate
+			 FROM dbo.ScheduleAssignments sut
 			 WHERE sut.ScheduleId = @scheduleId
-			   AND sut.EmployeeTypeId = @fromEmployeeTypeId
+			   AND sut.ShiftId = @fromShiftId
 			   AND sut.StartDate < @effectiveStartDate
 			   AND (sut.EndDate IS NULL OR sut.EndDate >= @effectiveStartDate)
 			   AND sut.IsActive = 1
 			   AND sut.DeletedAt IS NULL;
 
-			 UPDATE dbo.ScheduleUserTypes
+			 UPDATE dbo.ScheduleAssignments
 			 SET EndDate = @splitDateEnd,
 				 EndedAt = SYSUTCDATETIME(),
 				 EndedBy = @actorOid
 			 WHERE ScheduleId = @scheduleId
-			   AND EmployeeTypeId = @fromEmployeeTypeId
+			   AND ShiftId = @fromShiftId
 			   AND StartDate < @effectiveStartDate
 			   AND (EndDate IS NULL OR EndDate >= @effectiveStartDate)
 			   AND IsActive = 1
 			   AND DeletedAt IS NULL;
 
-			 INSERT INTO dbo.ScheduleUserTypes (
+			 INSERT INTO dbo.ScheduleAssignments (
 				ScheduleId,
 				UserOid,
-				EmployeeTypeId,
+				ShiftId,
 				StartDate,
 				EndDate,
-				DisplayOrder,
 				CreatedBy,
 				IsActive
 			 )
 			 SELECT
 				@scheduleId,
 				split.UserOid,
-				@toEmployeeTypeId,
+				@toShiftId,
 				@effectiveStartDate,
 				split.EndDate,
-				split.DisplayOrder,
 				@actorOid,
 				1
 			 FROM @AssignmentSplits split;
 
-			 UPDATE dbo.ScheduleEvents
-			 SET EmployeeTypeId = @toEmployeeTypeId
+			 UPDATE dbo.ScheduleAssignmentOrders
+			 SET ShiftId = @toShiftId
 			 WHERE ScheduleId = @scheduleId
-			   AND EmployeeTypeId = @fromEmployeeTypeId
+			   AND ShiftId = @fromShiftId
+			   AND EffectiveMonth >= DATEFROMPARTS(
+					YEAR(@effectiveStartDate),
+					MONTH(@effectiveStartDate),
+					1
+			   );
+
+			 UPDATE dbo.ScheduleEvents
+			 SET ShiftId = @toShiftId
+			 WHERE ScheduleId = @scheduleId
+			   AND ShiftId = @fromShiftId
 			   AND StartDate >= @effectiveStartDate
 			   AND IsActive = 1
 			   AND DeletedAt IS NULL;
@@ -826,7 +1065,7 @@ async function moveShiftScopedDataFromDate(params: {
 			 DECLARE @EventSplits TABLE (
 				UserOid nvarchar(64) NULL,
 				EndDate date NOT NULL,
-				CoverageCodeId int NULL,
+				EventCodeId int NULL,
 				CustomCode nvarchar(16) NULL,
 				CustomName nvarchar(100) NULL,
 				CustomDisplayMode nvarchar(30) NULL,
@@ -839,7 +1078,7 @@ async function moveShiftScopedDataFromDate(params: {
 			 INSERT INTO @EventSplits (
 				UserOid,
 				EndDate,
-				CoverageCodeId,
+				EventCodeId,
 				CustomCode,
 				CustomName,
 				CustomDisplayMode,
@@ -851,7 +1090,7 @@ async function moveShiftScopedDataFromDate(params: {
 			 SELECT
 				se.UserOid,
 				se.EndDate,
-				se.CoverageCodeId,
+				se.EventCodeId,
 				se.CustomCode,
 				se.CustomName,
 				se.CustomDisplayMode,
@@ -861,7 +1100,7 @@ async function moveShiftScopedDataFromDate(params: {
 				se.CreatedBy
 			 FROM dbo.ScheduleEvents se
 			 WHERE se.ScheduleId = @scheduleId
-			   AND se.EmployeeTypeId = @fromEmployeeTypeId
+			   AND se.ShiftId = @fromShiftId
 			   AND se.StartDate < @effectiveStartDate
 			   AND se.EndDate >= @effectiveStartDate
 			   AND se.IsActive = 1
@@ -870,7 +1109,7 @@ async function moveShiftScopedDataFromDate(params: {
 			 UPDATE dbo.ScheduleEvents
 			 SET EndDate = @splitDateEnd
 			 WHERE ScheduleId = @scheduleId
-			   AND EmployeeTypeId = @fromEmployeeTypeId
+			   AND ShiftId = @fromShiftId
 			   AND StartDate < @effectiveStartDate
 			   AND EndDate >= @effectiveStartDate
 			   AND IsActive = 1
@@ -879,10 +1118,10 @@ async function moveShiftScopedDataFromDate(params: {
 			 INSERT INTO dbo.ScheduleEvents (
 				ScheduleId,
 				UserOid,
-				EmployeeTypeId,
+				ShiftId,
 				StartDate,
 				EndDate,
-				CoverageCodeId,
+				EventCodeId,
 				CustomCode,
 				CustomName,
 				CustomDisplayMode,
@@ -895,10 +1134,10 @@ async function moveShiftScopedDataFromDate(params: {
 			 SELECT
 				@scheduleId,
 				eventSplit.UserOid,
-				@toEmployeeTypeId,
+				@toShiftId,
 				@effectiveStartDate,
 				eventSplit.EndDate,
-				eventSplit.CoverageCodeId,
+				eventSplit.EventCodeId,
 				eventSplit.CustomCode,
 				eventSplit.CustomName,
 				eventSplit.CustomDisplayMode,
@@ -929,18 +1168,18 @@ export const GET: RequestHandler = async ({ locals, cookies, url }) => {
 		.input('monthEnd', sql.Date, toSqlDateValue(monthEnd))
 		.query(
 			`SELECT
-				et.EmployeeTypeId,
+				et.ShiftId,
 				COALESCE(vAtMonthStart.Name, vInMonth.Name) AS Name,
 				COALESCE(vAtMonthStart.PatternId, vInMonth.PatternId) AS PatternId,
 				p.Name AS PatternName,
 				COALESCE(vAtMonthStart.StartDate, vInMonth.StartDate) AS StartDate,
 				COALESCE(vAtMonthStart.EndDate, vInMonth.EndDate) AS EndDate
-			 FROM dbo.EmployeeTypes et
+			 FROM dbo.Shifts et
 			 OUTER APPLY (
 				SELECT TOP (1) etv.Name, etv.PatternId, etv.StartDate, etv.EndDate
-				FROM dbo.EmployeeTypeVersions etv
+				FROM dbo.ShiftEdits etv
 				WHERE etv.ScheduleId = et.ScheduleId
-				  AND etv.EmployeeTypeId = et.EmployeeTypeId
+				  AND etv.ShiftId = et.ShiftId
 				  AND etv.IsActive = 1
 				  AND etv.DeletedAt IS NULL
 				  AND (etv.EndDate IS NULL OR etv.EndDate >= @monthStart)
@@ -949,9 +1188,9 @@ export const GET: RequestHandler = async ({ locals, cookies, url }) => {
 			 ) vAtMonthStart
 			 OUTER APPLY (
 				SELECT TOP (1) etv.Name, etv.PatternId, etv.StartDate, etv.EndDate
-				FROM dbo.EmployeeTypeVersions etv
+				FROM dbo.ShiftEdits etv
 				WHERE etv.ScheduleId = et.ScheduleId
-				  AND etv.EmployeeTypeId = et.EmployeeTypeId
+				  AND etv.ShiftId = et.ShiftId
 				  AND etv.IsActive = 1
 				  AND etv.DeletedAt IS NULL
 				  AND etv.StartDate > @monthStart
@@ -975,13 +1214,14 @@ export const GET: RequestHandler = async ({ locals, cookies, url }) => {
 		.input('scheduleId', scheduleId)
 		.query(
 			`SELECT
-				etv.EmployeeTypeId,
+				etv.ShiftId,
 				etv.StartDate,
 				etv.EndDate,
 				etv.Name,
 				etv.PatternId,
+				COALESCE(etv.UpdatedAt, etv.CreatedAt) AS ModifiedAt,
 				p.Name AS PatternName
-			 FROM dbo.EmployeeTypeVersions etv
+			 FROM dbo.ShiftEdits etv
 			 LEFT JOIN dbo.Patterns p
 				ON p.PatternId = etv.PatternId
 			   AND p.ScheduleId = etv.ScheduleId
@@ -990,10 +1230,10 @@ export const GET: RequestHandler = async ({ locals, cookies, url }) => {
 			 WHERE etv.ScheduleId = @scheduleId
 			   AND etv.IsActive = 1
 			   AND etv.DeletedAt IS NULL
-			 ORDER BY etv.EmployeeTypeId ASC, etv.StartDate ASC;`
+			 ORDER BY etv.ShiftId ASC, etv.StartDate ASC;`
 		);
 
-	const activeShiftIds = (shiftResult.recordset as ShiftRow[]).map((row) => Number(row.EmployeeTypeId));
+	const activeShiftIds = (shiftResult.recordset as ShiftRow[]).map((row) => Number(row.ShiftId));
 	const fallbackOrderedIds = await getFallbackOrderedShiftIdsForMonth({
 		runner: pool,
 		scheduleId,
@@ -1017,26 +1257,33 @@ export const GET: RequestHandler = async ({ locals, cookies, url }) => {
 			name: string;
 			patternId: number | null;
 			pattern: string;
+			versionStamp: string;
+			modifiedAtIso: string | null;
 		}>
 	>();
 
-	for (const row of historyResult.recordset as Array<VersionRow & { EmployeeTypeId: number; PatternName: string | null }>) {
-		const employeeTypeId = Number(row.EmployeeTypeId);
+	for (const row of historyResult.recordset as Array<VersionRow & { ShiftId: number; PatternName: string | null }>) {
+		const employeeTypeId = Number(row.ShiftId);
 		const list = historyByShift.get(employeeTypeId) ?? [];
+		const startDate = toDateOnly(row.StartDate) ?? '';
+		const modifiedAtIso = toDateTimeIso((row as VersionRow).ModifiedAt);
 		list.push({
 			sortOrder: orderMap.get(employeeTypeId) ?? Number.MAX_SAFE_INTEGER,
-			startDate: toDateOnly(row.StartDate) ?? '',
+			startDate,
 			endDate: toDateOnly(row.EndDate),
 			name: row.Name,
 			patternId: row.PatternId,
-			pattern: row.PatternName?.trim() || ''
+			pattern: row.PatternName?.trim() || '',
+			versionStamp: versionStampForVersion(startDate, modifiedAtIso),
+			modifiedAtIso
 		});
 		historyByShift.set(employeeTypeId, list);
 	}
 
 	const shifts = (shiftResult.recordset as ShiftRow[])
 		.map((row) => {
-			const employeeTypeId = Number(row.EmployeeTypeId);
+			const employeeTypeId = Number(row.ShiftId);
+			const historyRows = historyByShift.get(employeeTypeId) ?? [];
 			return {
 				employeeTypeId,
 				sortOrder: orderMap.get(employeeTypeId) ?? Number.MAX_SAFE_INTEGER,
@@ -1045,7 +1292,8 @@ export const GET: RequestHandler = async ({ locals, cookies, url }) => {
 				pattern: row.PatternName?.trim() || '',
 				startDate: toDateOnly(row.StartDate) ?? '',
 				endDate: toDateOnly(row.EndDate),
-				changes: historyByShift.get(employeeTypeId) ?? []
+				versionStamp: shiftVersionStampForVersions(historyRows),
+				changes: historyRows.map(({ modifiedAtIso: _modifiedAtIso, ...change }) => change)
 			};
 		})
 		.sort((a, b) => {
@@ -1119,44 +1367,101 @@ export const PATCH: RequestHandler = async ({ locals, cookies, request }) => {
 
 	const { pool, scheduleId, actorOid } = await getActorContext(currentUser.id, cookies);
 	const body = await request.json().catch(() => null);
-	const employeeTypeId = cleanEmployeeTypeId(body?.employeeTypeId);
+	const employeeTypeId = cleanShiftId(body?.employeeTypeId);
 	const reorderOnly = body?.reorderOnly === true;
 
 	if (reorderOnly) {
 		const startDate = cleanDateOnly(body?.startDate, 'Start date');
 		const monthStart = monthStartForDate(startDate);
-		const orderedEmployeeTypeIds = cleanEmployeeTypeIdList(body?.orderedEmployeeTypeIds);
+		const orderedShiftIds = cleanShiftIdList(body?.orderedShiftIds);
+		const logContext = {
+			scheduleId,
+			actorOid,
+			sourceShiftId: employeeTypeId,
+			startDate,
+			monthStart,
+			orderedShiftIds
+		};
 
 		const tx = new sql.Transaction(pool);
 		await tx.begin();
 		try {
+			logShiftReorderServer('PATCH reorder request received', logContext);
 			const activeShiftIds = await getActiveShiftIdsForMonth({
 				runner: tx,
 				scheduleId,
 				monthStart
 			});
+			logShiftReorderServer('Active shifts for month resolved', {
+				...logContext,
+				activeShiftIds
+			});
 			const activeSet = new Set(activeShiftIds);
-			if (orderedEmployeeTypeIds.length !== activeShiftIds.length) {
-				throw error(400, 'orderedEmployeeTypeIds must include all shifts active in the selected month');
+			if (orderedShiftIds.length !== activeShiftIds.length) {
+				logShiftReorderServer('Rejecting reorder: count mismatch', {
+					...logContext,
+					activeShiftIds
+				});
+				throw error(400, 'orderedShiftIds must include all shifts active in the selected month');
 			}
-			if (!orderedEmployeeTypeIds.every((id) => activeSet.has(id))) {
-				throw error(400, 'orderedEmployeeTypeIds includes invalid shifts for the selected month');
+			if (!orderedShiftIds.every((id) => activeSet.has(id))) {
+				logShiftReorderServer('Rejecting reorder: contains invalid shift IDs', {
+					...logContext,
+					activeShiftIds
+				});
+				throw error(400, 'orderedShiftIds includes invalid shifts for the selected month');
 			}
 
 			await upsertShiftOrderSnapshot({
 				runner: tx,
 				scheduleId,
 				monthStart,
-				orderedShiftIds: orderedEmployeeTypeIds,
+				orderedShiftIds: orderedShiftIds,
 				actorOid
 			});
+			const persistedRows = await req(tx)
+				.input('scheduleId', scheduleId)
+				.input('monthStart', sql.Date, toSqlDateValue(monthStart))
+				.query(
+					`SELECT ShiftId
+					 FROM dbo.ScheduleShiftOrders
+					 WHERE ScheduleId = @scheduleId
+					   AND EffectiveMonth = @monthStart
+					 ORDER BY DisplayOrder ASC, ShiftId ASC;`
+				);
+			const persistedShiftIds = (persistedRows.recordset as Array<{ ShiftId: number }>).map((row) =>
+				Number(row.ShiftId)
+			);
+
+			const fallbackOrderedIds = await getFallbackOrderedShiftIdsForMonth({
+				runner: tx,
+				scheduleId,
+				monthStart
+			});
+			const resolvedOrder = await resolveShiftOrderForMonth({
+				runner: tx,
+				scheduleId,
+				monthStart,
+				activeShiftIds,
+				fallbackOrderedIds
+			});
+			logShiftReorderServer('Persisted month snapshot after upsert', {
+				...logContext,
+				persistedShiftIds,
+				resolvedOrder
+			});
 			await tx.commit();
+			logShiftReorderServer('PATCH reorder committed', logContext);
 		} catch (err) {
 			try {
 				await tx.rollback();
 			} catch {
 				// keep original error
 			}
+			logShiftReorderServer('PATCH reorder failed', {
+				...logContext,
+				error: err instanceof Error ? err.message : String(err)
+			});
 			throw err;
 		}
 		return json({ success: true });
@@ -1176,6 +1481,14 @@ export const PATCH: RequestHandler = async ({ locals, cookies, request }) => {
 			: 'timeline';
 	const changeStartDate =
 		editMode === 'history' ? cleanDateOnly(body?.changeStartDate, 'Change start date') : null;
+	const expectedShiftVersionStamp = cleanRequiredVersionStamp(
+		body?.expectedShiftVersionStamp,
+		'Shift version stamp'
+	);
+	const expectedChangeVersionStamp =
+		editMode === 'history'
+			? cleanRequiredVersionStamp(body?.expectedChangeVersionStamp, 'Change version stamp')
+			: null;
 
 	await ensurePatternExists(pool, scheduleId, patternId);
 	await ensureShiftExists(pool, scheduleId, employeeTypeId);
@@ -1187,10 +1500,22 @@ export const PATCH: RequestHandler = async ({ locals, cookies, request }) => {
 		if (versionsBefore.length === 0) {
 			throw error(400, 'Shift has no editable entries');
 		}
+		const currentShiftVersionStamp = shiftVersionStampForVersions(versionsBefore);
+		if (currentShiftVersionStamp !== expectedShiftVersionStamp) {
+			throw error(409, 'This shift has changed. Refresh and try again.');
+		}
 		const oldPrimaryStart = versionsBefore[0]?.startDate ?? startDate;
 
-		let sourceForName = versionsBefore.find((row) => row.startDate === (changeStartDate ?? startDate)) ?? null;
-		if (!sourceForName) {
+		let sourceForName: (typeof versionsBefore)[number] | null = null;
+		if (editMode === 'history' && changeStartDate) {
+			sourceForName = versionsBefore.find((row) => row.startDate === changeStartDate) ?? null;
+			if (!sourceForName) {
+				throw error(404, 'Shift not found');
+			}
+			if (expectedChangeVersionStamp && sourceForName.versionStamp !== expectedChangeVersionStamp) {
+				throw error(409, 'This shift change has changed. Refresh and try again.');
+			}
+		} else {
 			sourceForName =
 				versionsBefore.find((row) => rangesOverlap(row.startDate, row.endDate, startDate, startDate)) ??
 				versionsBefore[versionsBefore.length - 1];
@@ -1199,16 +1524,36 @@ export const PATCH: RequestHandler = async ({ locals, cookies, request }) => {
 		const rename = oldName !== name;
 
 		if (rename) {
+			const reorderMonthStart = monthStartForDate(startDate);
+			const preRenameActiveShiftIds = await getActiveShiftIdsForMonth({
+				runner: tx,
+				scheduleId,
+				monthStart: reorderMonthStart
+			});
+			const preRenameFallbackOrderedIds = await getFallbackOrderedShiftIdsForMonth({
+				runner: tx,
+				scheduleId,
+				monthStart: reorderMonthStart
+			});
+			const preRenameResolvedOrder = await resolveShiftOrderForMonth({
+				runner: tx,
+				scheduleId,
+				monthStart: reorderMonthStart,
+				activeShiftIds: preRenameActiveShiftIds,
+				fallbackOrderedIds: preRenameFallbackOrderedIds
+			});
+			const preRenameIndex = preRenameResolvedOrder.indexOf(employeeTypeId);
+
 			await assertNoNameOverlap({
 				runner: tx,
 				scheduleId,
 				name,
 				startDate,
 				endDate,
-				excludeEmployeeTypeId: employeeTypeId
+				excludeShiftId: employeeTypeId
 			});
 
-			const newEmployeeTypeId = await createOrReinstateShift({
+			const newShiftId = await createOrReinstateShift({
 				tx,
 				scheduleId,
 				name,
@@ -1223,20 +1568,44 @@ export const PATCH: RequestHandler = async ({ locals, cookies, request }) => {
 			const moveFutureVersions =
 				startDate < oldPrimaryStart
 					? []
-					: versionsBefore.filter((row) => row.startDate > startDate).map((row) => ({ ...row }));
+					: versionsBefore
+							.filter((row) => row.startDate > startDate)
+							.map(({ startDate: rowStartDate, endDate: rowEndDate, name: rowName, patternId: rowPatternId }) => ({
+								startDate: rowStartDate,
+								endDate: rowEndDate,
+								name: rowName,
+								patternId: rowPatternId
+							}));
 			const oldRemaining = versionsBefore
 				.filter((row) => row.startDate < startDate)
-				.map((row) => {
-					if (!row.endDate || row.endDate >= startDate) {
-						return { ...row, endDate: minusOneDay(startDate) };
+				.map(({ startDate: rowStartDate, endDate: rowEndDate, name: rowName, patternId: rowPatternId }) => {
+					if (!rowEndDate || rowEndDate >= startDate) {
+						return {
+							startDate: rowStartDate,
+							endDate: minusOneDay(startDate),
+							name: rowName,
+							patternId: rowPatternId
+						};
 					}
-					return { ...row };
+					return {
+						startDate: rowStartDate,
+						endDate: rowEndDate,
+						name: rowName,
+						patternId: rowPatternId
+					};
 				})
 				.filter((row) => row.endDate === null || row.endDate >= row.startDate);
 			oldRemaining.sort((a, b) => a.startDate.localeCompare(b.startDate));
 
 			if (moveFutureVersions.length > 0) {
-				const targetVersions = await loadVersions(tx, scheduleId, newEmployeeTypeId);
+				const targetVersions = (await loadVersions(tx, scheduleId, newShiftId)).map(
+					({ startDate: rowStartDate, endDate: rowEndDate, name: rowName, patternId: rowPatternId }) => ({
+						startDate: rowStartDate,
+						endDate: rowEndDate,
+						name: rowName,
+						patternId: rowPatternId
+					})
+				);
 				let merged = [...targetVersions];
 				for (const moved of moveFutureVersions) {
 					merged = applyIntervalSurgery({ existing: merged, inserted: moved });
@@ -1244,7 +1613,7 @@ export const PATCH: RequestHandler = async ({ locals, cookies, request }) => {
 				await replaceVersions({
 					runner: tx,
 					scheduleId,
-					employeeTypeId: newEmployeeTypeId,
+					employeeTypeId: newShiftId,
 					actorOid,
 					versions: merged
 				});
@@ -1261,9 +1630,25 @@ export const PATCH: RequestHandler = async ({ locals, cookies, request }) => {
 			await moveShiftScopedDataFromDate({
 				tx,
 				scheduleId,
-				fromEmployeeTypeId: employeeTypeId,
-				toEmployeeTypeId: newEmployeeTypeId,
+				fromShiftId: employeeTypeId,
+				toShiftId: newShiftId,
 				effectiveStartDate: startDate,
+				actorOid
+			});
+
+			await copyShiftDisplayOrder({
+				runner: tx,
+				scheduleId,
+				fromShiftId: employeeTypeId,
+				toShiftId: newShiftId,
+				actorOid
+			});
+			await replaceShiftInFutureOrderSnapshots({
+				runner: tx,
+				scheduleId,
+				monthStart: reorderMonthStart,
+				fromShiftId: employeeTypeId,
+				toShiftId: newShiftId,
 				actorOid
 			});
 
@@ -1271,7 +1656,7 @@ export const PATCH: RequestHandler = async ({ locals, cookies, request }) => {
 				await cleanupShiftScopedDataAfterEndDate({
 					runner: tx,
 					scheduleId,
-					employeeTypeId: newEmployeeTypeId,
+					employeeTypeId: newShiftId,
 					endDate,
 					actorOid
 				});
@@ -1286,15 +1671,17 @@ export const PATCH: RequestHandler = async ({ locals, cookies, request }) => {
 			await syncShiftMainFromVersions({
 				runner: tx,
 				scheduleId,
-				employeeTypeId: newEmployeeTypeId,
+				employeeTypeId: newShiftId,
 				actorOid
 			});
 
-			await registerAppendShiftOrderForMonth({
+			await registerReplaceShiftOrderForMonth({
 				runner: tx,
 				scheduleId,
-				monthStart: monthStartForDate(startDate),
-				employeeTypeId: newEmployeeTypeId,
+				monthStart: reorderMonthStart,
+				fromShiftId: employeeTypeId,
+				toShiftId: newShiftId,
+				preferredIndex: preRenameIndex >= 0 ? preRenameIndex : undefined,
 				actorOid
 			});
 
@@ -1308,14 +1695,14 @@ export const PATCH: RequestHandler = async ({ locals, cookies, request }) => {
 			name,
 			startDate,
 			endDate,
-			excludeEmployeeTypeId: employeeTypeId
+			excludeShiftId: employeeTypeId
 		});
 
 		let working = [...versionsBefore];
 		if (editMode === 'history' && changeStartDate) {
 			const exists = working.some((entry) => entry.startDate === changeStartDate);
 			if (!exists) {
-				throw error(404, 'Shift change entry not found');
+				throw error(404, 'Shift not found');
 			}
 			working = working.filter((entry) => entry.startDate !== changeStartDate);
 		}
@@ -1338,12 +1725,21 @@ export const PATCH: RequestHandler = async ({ locals, cookies, request }) => {
 			versions: rebuilt
 		});
 
-		if (endDate) {
+		const versionsAfter = await loadVersions(tx, scheduleId, employeeTypeId);
+		const hasOpenEndedVersion = versionsAfter.some((row) => row.endDate === null);
+		const terminalShiftEndDate = hasOpenEndedVersion
+			? null
+			: versionsAfter.reduce<string | null>((latest, row) => {
+					if (!row.endDate) return latest;
+					if (!latest || row.endDate > latest) return row.endDate;
+					return latest;
+				}, null);
+		if (terminalShiftEndDate) {
 			await cleanupShiftScopedDataAfterEndDate({
 				runner: tx,
 				scheduleId,
 				employeeTypeId,
-				endDate,
+				endDate: terminalShiftEndDate,
 				actorOid
 			});
 		}
@@ -1354,18 +1750,6 @@ export const PATCH: RequestHandler = async ({ locals, cookies, request }) => {
 			employeeTypeId,
 			actorOid
 		});
-
-		const versionsAfter = await loadVersions(tx, scheduleId, employeeTypeId);
-		const newPrimaryStart = versionsAfter[0]?.startDate ?? oldPrimaryStart;
-		if (newPrimaryStart !== oldPrimaryStart) {
-			await registerAppendShiftOrderForMonth({
-				runner: tx,
-				scheduleId,
-				monthStart: monthStartForDate(newPrimaryStart),
-				employeeTypeId,
-				actorOid
-			});
-		}
 
 		await tx.commit();
 	} catch (err) {
@@ -1388,36 +1772,43 @@ export const DELETE: RequestHandler = async ({ locals, cookies, request }) => {
 
 	const { pool, scheduleId, actorOid } = await getActorContext(currentUser.id, cookies);
 	const body = (await request.json().catch(() => null)) as RemoveShiftPayload | null;
-	const employeeTypeId = cleanEmployeeTypeId(body?.employeeTypeId);
+	const employeeTypeId = cleanShiftId(body?.employeeTypeId);
 	const editMode =
 		typeof body?.editMode === 'string' && body.editMode.trim().toLowerCase() === 'history'
 			? 'history'
 			: 'timeline';
 	const changeStartDate =
 		editMode === 'history' ? cleanDateOnly(body?.changeStartDate, 'Change start date') : null;
+	const expectedShiftVersionStamp = cleanRequiredVersionStamp(
+		body?.expectedShiftVersionStamp,
+		'Shift version stamp'
+	);
+	const expectedChangeVersionStamp =
+		editMode === 'history'
+			? cleanRequiredVersionStamp(body?.expectedChangeVersionStamp, 'Change version stamp')
+			: null;
 	const confirmUsedShiftRemoval = cleanBoolean(body?.confirmUsedShiftRemoval);
 
 	const tx = new sql.Transaction(pool);
 	await tx.begin();
 	try {
 		await ensureShiftExists(tx, scheduleId, employeeTypeId);
+		const versionsBefore = await loadVersions(tx, scheduleId, employeeTypeId);
+		if (versionsBefore.length === 0) {
+			throw error(404, 'Shift not found');
+		}
+		const currentShiftVersionStamp = shiftVersionStampForVersions(versionsBefore);
+		if (currentShiftVersionStamp !== expectedShiftVersionStamp) {
+			throw error(409, 'This shift has changed. Refresh and try again.');
+		}
 
 		if (editMode === 'history' && changeStartDate) {
-			const exists = await req(tx)
-				.input('scheduleId', scheduleId)
-				.input('employeeTypeId', employeeTypeId)
-				.input('changeStartDate', changeStartDate)
-				.query(
-					`SELECT TOP (1) StartDate
-					 FROM dbo.EmployeeTypeVersions
-					 WHERE ScheduleId = @scheduleId
-					   AND EmployeeTypeId = @employeeTypeId
-					   AND StartDate = @changeStartDate
-					   AND IsActive = 1
-					   AND DeletedAt IS NULL;`
-				);
-			if (!exists.recordset?.[0]?.StartDate) {
-				throw error(404, 'Shift change entry not found');
+			const targetVersion = versionsBefore.find((entry) => entry.startDate === changeStartDate) ?? null;
+			if (!targetVersion) {
+				throw error(404, 'Shift not found');
+			}
+			if (expectedChangeVersionStamp && targetVersion.versionStamp !== expectedChangeVersionStamp) {
+				throw error(409, 'This shift change has changed. Refresh and try again.');
 			}
 
 			await req(tx)
@@ -1425,9 +1816,9 @@ export const DELETE: RequestHandler = async ({ locals, cookies, request }) => {
 				.input('employeeTypeId', employeeTypeId)
 				.input('changeStartDate', changeStartDate)
 				.query(
-					`DELETE FROM dbo.EmployeeTypeVersions
+					`DELETE FROM dbo.ShiftEdits
 					 WHERE ScheduleId = @scheduleId
-					   AND EmployeeTypeId = @employeeTypeId
+					   AND ShiftId = @employeeTypeId
 					   AND StartDate = @changeStartDate
 					   AND IsActive = 1
 					   AND DeletedAt IS NULL;`
@@ -1449,9 +1840,9 @@ export const DELETE: RequestHandler = async ({ locals, cookies, request }) => {
 			.input('employeeTypeId', employeeTypeId)
 			.query(
 				`SELECT COUNT(*) AS AssignmentCount
-				 FROM dbo.ScheduleUserTypes
+				 FROM dbo.ScheduleAssignments
 				 WHERE ScheduleId = @scheduleId
-				   AND EmployeeTypeId = @employeeTypeId
+				   AND ShiftId = @employeeTypeId
 				   AND IsActive = 1
 				   AND DeletedAt IS NULL;`
 			);
@@ -1463,14 +1854,14 @@ export const DELETE: RequestHandler = async ({ locals, cookies, request }) => {
 				.input('employeeTypeId', employeeTypeId)
 				.query(
 					`SELECT
-						(SELECT COUNT(*) FROM dbo.ScheduleUserTypes
-						 WHERE ScheduleId = @scheduleId AND EmployeeTypeId = @employeeTypeId
+						(SELECT COUNT(*) FROM dbo.ScheduleAssignments
+						 WHERE ScheduleId = @scheduleId AND ShiftId = @employeeTypeId
 						   AND IsActive = 1 AND DeletedAt IS NULL) AS AssignmentCount,
 						(SELECT COUNT(*) FROM dbo.ScheduleEvents
-						 WHERE ScheduleId = @scheduleId AND EmployeeTypeId = @employeeTypeId
+						 WHERE ScheduleId = @scheduleId AND ShiftId = @employeeTypeId
 						   AND IsActive = 1 AND DeletedAt IS NULL) AS ShiftEventCount,
-						(SELECT COUNT(*) FROM dbo.EmployeeTypeVersions
-						 WHERE ScheduleId = @scheduleId AND EmployeeTypeId = @employeeTypeId
+						(SELECT COUNT(*) FROM dbo.ShiftEdits
+						 WHERE ScheduleId = @scheduleId AND ShiftId = @employeeTypeId
 						   AND IsActive = 1 AND DeletedAt IS NULL) AS ShiftChangeCount;`
 				);
 
@@ -1493,9 +1884,9 @@ export const DELETE: RequestHandler = async ({ locals, cookies, request }) => {
 			.input('employeeTypeId', employeeTypeId)
 			.query(
 				`SELECT TOP (1) StartDate
-				 FROM dbo.EmployeeTypeVersions
+				 FROM dbo.ShiftEdits
 				 WHERE ScheduleId = @scheduleId
-				   AND EmployeeTypeId = @employeeTypeId
+				   AND ShiftId = @employeeTypeId
 				   AND IsActive = 1
 				   AND DeletedAt IS NULL
 				 ORDER BY StartDate ASC;`
@@ -1514,9 +1905,9 @@ export const DELETE: RequestHandler = async ({ locals, cookies, request }) => {
 				   AND se.DeletedAt IS NULL
 				   AND EXISTS (
 						SELECT 1
-						FROM dbo.ScheduleUserTypes sut
+						FROM dbo.ScheduleAssignments sut
 						WHERE sut.ScheduleId = @scheduleId
-						  AND sut.EmployeeTypeId = @employeeTypeId
+						  AND sut.ShiftId = @employeeTypeId
 						  AND sut.UserOid = se.UserOid
 						  AND sut.IsActive = 1
 						  AND sut.DeletedAt IS NULL
@@ -1526,27 +1917,31 @@ export const DELETE: RequestHandler = async ({ locals, cookies, request }) => {
 
 				 DELETE FROM dbo.ScheduleEvents
 				 WHERE ScheduleId = @scheduleId
-				   AND EmployeeTypeId = @employeeTypeId
+				   AND ShiftId = @employeeTypeId
 				   AND IsActive = 1
 				   AND DeletedAt IS NULL;
 
-				 DELETE FROM dbo.ScheduleUserTypes
+				 DELETE FROM dbo.ScheduleAssignments
 				 WHERE ScheduleId = @scheduleId
-				   AND EmployeeTypeId = @employeeTypeId
+				   AND ShiftId = @employeeTypeId
 				   AND IsActive = 1
 				   AND DeletedAt IS NULL;
 
-				 DELETE FROM dbo.EmployeeTypeVersions
+				 DELETE FROM dbo.ShiftEdits
 				 WHERE ScheduleId = @scheduleId
-				   AND EmployeeTypeId = @employeeTypeId;
+				   AND ShiftId = @employeeTypeId;
 
-				 DELETE FROM dbo.ShiftOrderMonthItems
+				 DELETE FROM dbo.ScheduleShiftOrders
 				 WHERE ScheduleId = @scheduleId
-				   AND EmployeeTypeId = @employeeTypeId;
+				   AND ShiftId = @employeeTypeId;
 
-				 DELETE FROM dbo.EmployeeTypes
+				 DELETE FROM dbo.ScheduleAssignmentOrders
 				 WHERE ScheduleId = @scheduleId
-				   AND EmployeeTypeId = @employeeTypeId;`
+				   AND ShiftId = @employeeTypeId;
+
+				 DELETE FROM dbo.Shifts
+				 WHERE ScheduleId = @scheduleId
+				   AND ShiftId = @employeeTypeId;`
 			);
 
 		await req(tx)
@@ -1556,31 +1951,31 @@ export const DELETE: RequestHandler = async ({ locals, cookies, request }) => {
 					SELECT
 						ScheduleId,
 						EffectiveMonth,
-						EmployeeTypeId,
+						ShiftId,
 						ROW_NUMBER() OVER (
 							PARTITION BY ScheduleId, EffectiveMonth
-							ORDER BY DisplayOrder ASC, EmployeeTypeId ASC
+							ORDER BY DisplayOrder ASC, ShiftId ASC
 						) AS NextDisplayOrder
-					FROM dbo.ShiftOrderMonthItems
+					FROM dbo.ScheduleShiftOrders
 					WHERE ScheduleId = @scheduleId
 				)
 				UPDATE soi
 				SET DisplayOrder = o.NextDisplayOrder,
 					UpdatedAt = SYSUTCDATETIME(),
 					UpdatedBy = NULL
-				FROM dbo.ShiftOrderMonthItems soi
+				FROM dbo.ScheduleShiftOrders soi
 				INNER JOIN Ordered o
 				  ON o.ScheduleId = soi.ScheduleId
 				 AND o.EffectiveMonth = soi.EffectiveMonth
-				 AND o.EmployeeTypeId = soi.EmployeeTypeId
+				 AND o.ShiftId = soi.ShiftId
 				WHERE soi.DisplayOrder <> o.NextDisplayOrder;
 
 				DELETE som
-				FROM dbo.ShiftOrderMonths som
+				FROM dbo.ScheduleShiftOrders som
 				WHERE som.ScheduleId = @scheduleId
 				  AND NOT EXISTS (
 					SELECT 1
-					FROM dbo.ShiftOrderMonthItems soi
+					FROM dbo.ScheduleShiftOrders soi
 					WHERE soi.ScheduleId = som.ScheduleId
 					  AND soi.EffectiveMonth = som.EffectiveMonth
 				  );`

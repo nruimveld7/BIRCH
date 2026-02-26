@@ -1,0 +1,4 @@
+Add/Edit Assignments UI
+Use these screens to add new assignments or modify existing assignment records.
+
+Set effective dates and assignment details so coverage is accurate over time.

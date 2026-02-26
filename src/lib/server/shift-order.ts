@@ -67,10 +67,10 @@ export async function getActiveShiftIdsForMonth(params: {
 		.input('monthStart', sql.Date, toSqlDateValue(params.monthStart))
 		.input('monthEnd', sql.Date, toSqlDateValue(monthEnd))
 		.query(
-			`SELECT DISTINCT etv.EmployeeTypeId
-			 FROM dbo.EmployeeTypeVersions etv
-			 INNER JOIN dbo.EmployeeTypes et
-			   ON et.EmployeeTypeId = etv.EmployeeTypeId
+			`SELECT DISTINCT etv.ShiftId
+			 FROM dbo.ShiftEdits etv
+			 INNER JOIN dbo.Shifts et
+			   ON et.ShiftId = etv.ShiftId
 			  AND et.ScheduleId = etv.ScheduleId
 			  AND et.IsActive = 1
 			  AND et.DeletedAt IS NULL
@@ -80,7 +80,7 @@ export async function getActiveShiftIdsForMonth(params: {
 			   AND etv.StartDate <= @monthEnd
 			   AND (etv.EndDate IS NULL OR etv.EndDate >= @monthStart);`
 		);
-	return (result.recordset as Array<{ EmployeeTypeId: number }>).map((row) => Number(row.EmployeeTypeId));
+	return (result.recordset as Array<{ ShiftId: number }>).map((row) => Number(row.ShiftId));
 }
 
 export async function resolveShiftOrderForMonth(params: {
@@ -98,7 +98,7 @@ export async function resolveShiftOrderForMonth(params: {
 		.input('monthStart', sql.Date, toSqlDateValue(params.monthStart))
 		.query(
 			`SELECT TOP (1) EffectiveMonth
-			 FROM dbo.ShiftOrderMonths
+			 FROM dbo.ScheduleShiftOrders
 			 WHERE ScheduleId = @scheduleId
 			   AND EffectiveMonth <= @monthStart
 			 ORDER BY EffectiveMonth DESC;`
@@ -110,14 +110,14 @@ export async function resolveShiftOrderForMonth(params: {
 			.input('scheduleId', params.scheduleId)
 			.input('effectiveMonth', sql.Date, new Date(resolvedMonth))
 			.query(
-				`SELECT EmployeeTypeId
-				 FROM dbo.ShiftOrderMonthItems
+				`SELECT ShiftId
+				 FROM dbo.ScheduleShiftOrders
 				 WHERE ScheduleId = @scheduleId
 				   AND EffectiveMonth = @effectiveMonth
-				 ORDER BY DisplayOrder ASC, EmployeeTypeId ASC;`
+				 ORDER BY DisplayOrder ASC, ShiftId ASC;`
 			);
-		for (const row of snapshotRows.recordset as Array<{ EmployeeTypeId: number }>) {
-			const id = Number(row.EmployeeTypeId);
+		for (const row of snapshotRows.recordset as Array<{ ShiftId: number }>) {
+			const id = Number(row.ShiftId);
 			if (activeSet.has(id) && !orderedFromSnapshot.includes(id)) {
 				orderedFromSnapshot.push(id);
 			}
@@ -153,53 +153,32 @@ export async function upsertShiftOrderSnapshot(params: {
 	await createRequest(params.runner)
 		.input('scheduleId', params.scheduleId)
 		.input('monthStart', sql.Date, toSqlDateValue(params.monthStart))
-		.input('actorOid', params.actorOid)
 		.query(
-			`IF NOT EXISTS (
-				SELECT 1 FROM dbo.ShiftOrderMonths
-				WHERE ScheduleId = @scheduleId AND EffectiveMonth = @monthStart
-			)
-			BEGIN
-				INSERT INTO dbo.ShiftOrderMonths (ScheduleId, EffectiveMonth, CreatedBy)
-				VALUES (@scheduleId, @monthStart, @actorOid);
-			END
-			ELSE
-			BEGIN
-				UPDATE dbo.ShiftOrderMonths
-				SET UpdatedAt = SYSUTCDATETIME(), UpdatedBy = @actorOid
-				WHERE ScheduleId = @scheduleId AND EffectiveMonth = @monthStart;
-			END;`
-		);
-
-	await createRequest(params.runner)
-		.input('scheduleId', params.scheduleId)
-		.input('monthStart', sql.Date, toSqlDateValue(params.monthStart))
-		.query(
-			`DELETE FROM dbo.ShiftOrderMonthItems
+			`DELETE FROM dbo.ScheduleShiftOrders
 			 WHERE ScheduleId = @scheduleId
 			   AND EffectiveMonth = @monthStart;`
 		);
 
 	for (let index = 0; index < params.orderedShiftIds.length; index += 1) {
-		const employeeTypeId = params.orderedShiftIds[index];
+		const shiftId = params.orderedShiftIds[index];
 		await createRequest(params.runner)
 			.input('scheduleId', params.scheduleId)
 			.input('monthStart', sql.Date, toSqlDateValue(params.monthStart))
-			.input('employeeTypeId', employeeTypeId)
+			.input('shiftId', shiftId)
 			.input('displayOrder', index + 1)
 			.input('actorOid', params.actorOid)
 			.query(
-				`INSERT INTO dbo.ShiftOrderMonthItems (
+				`INSERT INTO dbo.ScheduleShiftOrders (
 					ScheduleId,
 					EffectiveMonth,
-					EmployeeTypeId,
+					ShiftId,
 					DisplayOrder,
 					CreatedBy
 				)
 				VALUES (
 					@scheduleId,
 					@monthStart,
-					@employeeTypeId,
+					@shiftId,
 					@displayOrder,
 					@actorOid
 				);`

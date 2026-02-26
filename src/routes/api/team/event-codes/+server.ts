@@ -7,7 +7,7 @@ type ScheduleRole = 'Member' | 'Maintainer' | 'Manager';
 type EventCodeDisplayMode = 'Schedule Overlay' | 'Badge Indicator' | 'Shift Override';
 
 type EventCodeRow = {
-	CoverageCodeId: number;
+	EventCodeId: number;
 	Code: string;
 	Label: string | null;
 	DisplayMode: EventCodeDisplayMode | null;
@@ -15,9 +15,10 @@ type EventCodeRow = {
 	IsActive: boolean;
 	NotifyImmediately: boolean | null;
 	ScheduledRemindersJson: string | null;
+	ModifiedAt?: Date | string | null;
 };
 
-type CoverageCodesCapabilities = {
+type EventCodesCapabilities = {
 	hasReminderColumns: boolean;
 };
 
@@ -64,14 +65,14 @@ async function getActorContext(localsUserOid: string, cookies: Cookies) {
 	return { pool, scheduleId, actorOid: localsUserOid };
 }
 
-async function getCoverageCodesCapabilities(
+async function getEventCodesCapabilities(
 	pool: Awaited<ReturnType<typeof GetPool>>
-): Promise<CoverageCodesCapabilities> {
+): Promise<EventCodesCapabilities> {
 	const result = await pool.request().query(
 		`SELECT COLUMN_NAME
 		 FROM INFORMATION_SCHEMA.COLUMNS
 		 WHERE TABLE_SCHEMA = 'dbo'
-		   AND TABLE_NAME = 'CoverageCodes';`
+		   AND TABLE_NAME = 'EventCodes';`
 	);
 	const columns = new Set<string>(
 		(result.recordset as Array<{ COLUMN_NAME: string }>).map((row) => row.COLUMN_NAME)
@@ -210,6 +211,26 @@ function cleanEventCodeId(value: unknown): number {
 	return parsed;
 }
 
+function cleanRequiredVersionStamp(value: unknown, label: string): string {
+	if (typeof value !== 'string') {
+		throw error(400, `${label} is required`);
+	}
+	const trimmed = value.trim();
+	if (!trimmed) {
+		throw error(400, `${label} is required`);
+	}
+	return trimmed.slice(0, 200);
+}
+
+function toDateTimeIso(value: Date | string | null | undefined): string | null {
+	if (!value) return null;
+	if (value instanceof Date) return value.toISOString();
+	if (typeof value !== 'string') return null;
+	const parsed = new Date(value);
+	if (Number.isNaN(parsed.getTime())) return null;
+	return parsed.toISOString();
+}
+
 export const GET: RequestHandler = async ({ locals, cookies }) => {
 	const currentUser = locals.user;
 	if (!currentUser) {
@@ -217,7 +238,7 @@ export const GET: RequestHandler = async ({ locals, cookies }) => {
 	}
 
 	const { pool, scheduleId } = await getActorContext(currentUser.id, cookies);
-	const capabilities = await getCoverageCodesCapabilities(pool);
+	const capabilities = await getEventCodesCapabilities(pool);
 	const selectNotifyImmediately = capabilities.hasReminderColumns
 		? 'NotifyImmediately'
 		: 'CAST(0 AS bit) AS NotifyImmediately';
@@ -226,29 +247,31 @@ export const GET: RequestHandler = async ({ locals, cookies }) => {
 		: 'CAST(NULL AS nvarchar(max)) AS ScheduledRemindersJson';
 	const result = await pool.request().input('scheduleId', scheduleId).query(
 		`SELECT
-			CoverageCodeId,
+			EventCodeId,
 			Code,
 			Label,
 			DisplayMode,
 			Color,
 			IsActive,
+			COALESCE(UpdatedAt, CreatedAt) AS ModifiedAt,
 			${selectNotifyImmediately},
 			${selectScheduledRemindersJson}
-		 FROM dbo.CoverageCodes
+		 FROM dbo.EventCodes
 		 WHERE ScheduleId = @scheduleId
 		   AND DeletedAt IS NULL
-		 ORDER BY SortOrder ASC, Code ASC, CoverageCodeId ASC;`
+		 ORDER BY SortOrder ASC, Code ASC, EventCodeId ASC;`
 	);
 
 	const eventCodes = (result.recordset as EventCodeRow[]).map((row) => ({
-		eventCodeId: Number(row.CoverageCodeId),
+		eventCodeId: Number(row.EventCodeId),
 		code: row.Code?.trim() ?? '',
 		name: row.Label?.trim() || row.Code?.trim() || '',
 		displayMode: (row.DisplayMode ?? 'Schedule Overlay') as EventCodeDisplayMode,
 		color: row.Color?.trim() || '#22c55e',
 		isActive: Boolean(row.IsActive),
 		notifyImmediately: Boolean(row.NotifyImmediately),
-		scheduledReminders: parseScheduledRemindersJson(row.ScheduledRemindersJson)
+		scheduledReminders: parseScheduledRemindersJson(row.ScheduledRemindersJson),
+		versionStamp: `${Number(row.EventCodeId)}|${toDateTimeIso(row.ModifiedAt) ?? '0'}`
 	}));
 
 	return json({ eventCodes });
@@ -269,20 +292,20 @@ export const POST: RequestHandler = async ({ locals, cookies, request }) => {
 	const isActive = cleanIsActive(body?.isActive);
 	const notifyImmediately = cleanNotifyImmediately(body?.notifyImmediately);
 	const scheduledRemindersJson = cleanScheduledRemindersJson(body?.scheduledReminders);
-	const capabilities = await getCoverageCodesCapabilities(pool);
+	const capabilities = await getEventCodesCapabilities(pool);
 
 	const duplicateResult = await pool
 		.request()
 		.input('scheduleId', scheduleId)
 		.input('code', code)
 		.query(
-			`SELECT TOP (1) CoverageCodeId
-			 FROM dbo.CoverageCodes
+			`SELECT TOP (1) EventCodeId
+			 FROM dbo.EventCodes
 			 WHERE ScheduleId = @scheduleId
 			   AND Code = @code
 			   AND DeletedAt IS NULL;`
 		);
-	if (duplicateResult.recordset?.[0]?.CoverageCodeId) {
+	if (duplicateResult.recordset?.[0]?.EventCodeId) {
 		throw error(400, 'An event code with this code already exists in this schedule.');
 	}
 
@@ -291,7 +314,7 @@ export const POST: RequestHandler = async ({ locals, cookies, request }) => {
 		.input('scheduleId', scheduleId)
 		.query(
 			`SELECT COUNT(*) AS EventCodeCount
-			 FROM dbo.CoverageCodes
+			 FROM dbo.EventCodes
 			 WHERE ScheduleId = @scheduleId
 			   AND DeletedAt IS NULL;`
 		);
@@ -335,7 +358,7 @@ export const POST: RequestHandler = async ({ locals, cookies, request }) => {
 		.input('sortOrder', nextSortOrder)
 		.input('actorOid', actorOid)
 		.query(
-			`INSERT INTO dbo.CoverageCodes (${insertColumns.join(', ')})
+			`INSERT INTO dbo.EventCodes (${insertColumns.join(', ')})
 			 VALUES (${insertValues.join(', ')});`
 		);
 
@@ -348,9 +371,13 @@ export const PATCH: RequestHandler = async ({ locals, cookies, request }) => {
 		throw error(401, 'Unauthorized');
 	}
 
-	const { pool, scheduleId } = await getActorContext(currentUser.id, cookies);
+	const { pool, scheduleId, actorOid } = await getActorContext(currentUser.id, cookies);
 	const body = await request.json().catch(() => null);
 	const eventCodeId = cleanEventCodeId(body?.eventCodeId);
+	const expectedVersionStamp = cleanRequiredVersionStamp(
+		body?.expectedVersionStamp,
+		'Version stamp'
+	);
 	const code = cleanCode(body?.code);
 	const name = cleanName(body?.name);
 	const displayMode = cleanDisplayMode(body?.displayMode);
@@ -358,21 +385,30 @@ export const PATCH: RequestHandler = async ({ locals, cookies, request }) => {
 	const isActive = cleanIsActive(body?.isActive);
 	const notifyImmediately = cleanNotifyImmediately(body?.notifyImmediately);
 	const scheduledRemindersJson = cleanScheduledRemindersJson(body?.scheduledReminders);
-	const capabilities = await getCoverageCodesCapabilities(pool);
+	const capabilities = await getEventCodesCapabilities(pool);
 
 	const existsResult = await pool
 		.request()
 		.input('scheduleId', scheduleId)
 		.input('eventCodeId', eventCodeId)
 		.query(
-			`SELECT TOP (1) CoverageCodeId
-			 FROM dbo.CoverageCodes
+			`SELECT TOP (1) EventCodeId, COALESCE(UpdatedAt, CreatedAt) AS ModifiedAt
+			 FROM dbo.EventCodes
 			 WHERE ScheduleId = @scheduleId
-			   AND CoverageCodeId = @eventCodeId
+			   AND EventCodeId = @eventCodeId
 			   AND DeletedAt IS NULL;`
 		);
-	if (!existsResult.recordset?.[0]?.CoverageCodeId) {
+	const existingRow = existsResult.recordset?.[0] as
+		| { EventCodeId?: number; ModifiedAt?: Date | string | null }
+		| undefined;
+	if (!existingRow?.EventCodeId) {
 		throw error(404, 'Event code not found');
+	}
+	const currentVersionStamp = `${Number(existingRow.EventCodeId)}|${
+		toDateTimeIso(existingRow.ModifiedAt) ?? '0'
+	}`;
+	if (currentVersionStamp !== expectedVersionStamp) {
+		throw error(409, 'This event code has changed. Refresh and try again.');
 	}
 
 	const duplicateResult = await pool
@@ -381,14 +417,14 @@ export const PATCH: RequestHandler = async ({ locals, cookies, request }) => {
 		.input('eventCodeId', eventCodeId)
 		.input('code', code)
 		.query(
-			`SELECT TOP (1) CoverageCodeId
-			 FROM dbo.CoverageCodes
+			`SELECT TOP (1) EventCodeId
+			 FROM dbo.EventCodes
 			 WHERE ScheduleId = @scheduleId
-			   AND CoverageCodeId <> @eventCodeId
+			   AND EventCodeId <> @eventCodeId
 			   AND Code = @code
 			   AND DeletedAt IS NULL;`
 		);
-	if (duplicateResult.recordset?.[0]?.CoverageCodeId) {
+	if (duplicateResult.recordset?.[0]?.EventCodeId) {
 		throw error(400, 'An event code with this code already exists in this schedule.');
 	}
 
@@ -397,7 +433,9 @@ export const PATCH: RequestHandler = async ({ locals, cookies, request }) => {
 		'Label = @name',
 		'DisplayMode = @displayMode',
 		'Color = @color',
-		'IsActive = @isActive'
+		'IsActive = @isActive',
+		'UpdatedAt = SYSUTCDATETIME()',
+		'UpdatedBy = @actorOid'
 	];
 	if (capabilities.hasReminderColumns) {
 		setClauses.push('NotifyImmediately = @notifyImmediately', 'ScheduledRemindersJson = @scheduledRemindersJson');
@@ -414,11 +452,12 @@ export const PATCH: RequestHandler = async ({ locals, cookies, request }) => {
 		.input('isActive', isActive)
 		.input('notifyImmediately', notifyImmediately)
 		.input('scheduledRemindersJson', scheduledRemindersJson)
+		.input('actorOid', actorOid)
 		.query(
-			`UPDATE dbo.CoverageCodes
+			`UPDATE dbo.EventCodes
 			 SET ${setClauses.join(', ')}
 			 WHERE ScheduleId = @scheduleId
-			   AND CoverageCodeId = @eventCodeId
+			   AND EventCodeId = @eventCodeId
 			   AND DeletedAt IS NULL;`
 		);
 

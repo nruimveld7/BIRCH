@@ -3,6 +3,7 @@ import type { Cookies, RequestHandler } from '@sveltejs/kit';
 import { GetPool } from '$lib/server/db';
 import { getActiveScheduleId } from '$lib/server/auth';
 import { sendUpcomingEventNotification } from '$lib/server/mail/notifications';
+import sql from 'mssql';
 
 type ScheduleRole = 'Member' | 'Maintainer' | 'Manager';
 type EventScopeType = 'global' | 'shift' | 'user';
@@ -11,11 +12,11 @@ type EventDisplayMode = 'Schedule Overlay' | 'Badge Indicator' | 'Shift Override
 type ScheduleEventRow = {
 	EventId: number;
 	UserOid: string | null;
-	EmployeeTypeId: number | null;
+	ShiftId: number | null;
 	StartDate: Date | string;
 	EndDate: Date | string;
 	Notes: string | null;
-	CoverageCodeId: number | null;
+	EventCodeId: number | null;
 	CustomCode: string | null;
 	CustomName: string | null;
 	CustomDisplayMode: EventDisplayMode | null;
@@ -31,11 +32,21 @@ type ScheduleEventRow = {
 type ExistingEventScopeRow = {
 	EventId: number;
 	UserOid: string | null;
-	EmployeeTypeId: number | null;
+	ShiftId: number | null;
+	StartDate: Date | string;
+	EndDate: Date | string;
+	Notes: string | null;
+	EventCodeId: number | null;
+	CustomCode: string | null;
+	CustomName: string | null;
+	CustomDisplayMode: EventDisplayMode | null;
+	CustomColor: string | null;
+	NotifyImmediately: boolean | null;
+	ScheduledRemindersJson: string | null;
 };
 
 type ScheduleEventsCapabilities = {
-	hasEmployeeTypeId: boolean;
+	hasShiftId: boolean;
 	hasCustomColumns: boolean;
 	hasReminderColumns: boolean;
 };
@@ -47,6 +58,8 @@ type ReminderDraft = {
 	unit: ReminderUnit;
 	hour: number;
 	meridiem: ReminderMeridiem;
+	handled?: boolean;
+	handledAtUtc?: string;
 };
 type AffectedEventMember = {
 	name: string;
@@ -125,6 +138,21 @@ function cleanDateOnly(value: unknown, label: string): string {
 	return trimmed;
 }
 
+function dateOnlyFromServerNow(now: Date = new Date()): string {
+	const year = String(now.getFullYear()).padStart(4, '0');
+	const month = String(now.getMonth() + 1).padStart(2, '0');
+	const day = String(now.getDate()).padStart(2, '0');
+	return `${year}-${month}-${day}`;
+}
+
+function eventRangeIsNotEntirelyPast(
+	endDate: string,
+	now: Date = new Date()
+): boolean {
+	const currentDate = dateOnlyFromServerNow(now);
+	return endDate >= currentDate;
+}
+
 function cleanOptionalComments(value: unknown): string {
 	if (value === null || value === undefined) return '';
 	if (typeof value !== 'string') {
@@ -140,6 +168,17 @@ function cleanOptionalInt(value: unknown, label: string): number | null {
 		throw error(400, `${label} is invalid`);
 	}
 	return parsed;
+}
+
+function cleanRequiredVersionStamp(value: unknown, label: string): string {
+	if (typeof value !== 'string') {
+		throw error(400, `${label} is required`);
+	}
+	const trimmed = value.trim();
+	if (!trimmed) {
+		throw error(400, `${label} is required`);
+	}
+	return trimmed.slice(0, 500);
 }
 
 function cleanOptionalUserOid(value: unknown): string | null {
@@ -241,7 +280,16 @@ function cleanScheduledReminders(value: unknown): ReminderDraft[] {
 
 function remindersToJson(reminders: ReminderDraft[]): string | null {
 	if (reminders.length === 0) return null;
-	return JSON.stringify(reminders);
+	return JSON.stringify(
+		reminders.map((reminder) => ({
+			amount: reminder.amount,
+			unit: reminder.unit,
+			hour: reminder.hour,
+			meridiem: reminder.meridiem,
+			handled: reminder.handled === true,
+			handledAtUtc: reminder.handled === true ? (reminder.handledAtUtc ?? null) : null
+		}))
+	);
 }
 
 function parseScheduledRemindersJson(value: string | null): ReminderDraft[] {
@@ -261,7 +309,14 @@ function parseScheduledRemindersJson(value: string | null): ReminderDraft[] {
 			if (unit !== 'days' && unit !== 'weeks' && unit !== 'months') continue;
 			if (!Number.isInteger(hour) || hour < 0 || hour > 12) continue;
 			if (meridiem !== 'AM' && meridiem !== 'PM') continue;
-			output.push({ amount, unit, hour, meridiem });
+			output.push({
+				amount,
+				unit,
+				hour,
+				meridiem,
+				handled: row.handled === true,
+				handledAtUtc: typeof row.handledAtUtc === 'string' ? row.handledAtUtc : undefined
+			});
 		}
 		return output;
 	} catch {
@@ -269,11 +324,67 @@ function parseScheduledRemindersJson(value: string | null): ReminderDraft[] {
 	}
 }
 
+function scheduledReminderKey(reminder: ReminderDraft): string {
+	return `${reminder.amount}|${reminder.unit}|${reminder.hour}|${reminder.meridiem}`;
+}
+
+function mergeReminderHandlingFromExisting(
+	reminders: ReminderDraft[],
+	existingRemindersJson: string | null
+): ReminderDraft[] {
+	const existingByKey = new Map<string, ReminderDraft>();
+	for (const reminder of parseScheduledRemindersJson(existingRemindersJson)) {
+		existingByKey.set(scheduledReminderKey(reminder), reminder);
+	}
+	return reminders.map((reminder) => {
+		const existing = existingByKey.get(scheduledReminderKey(reminder));
+		if (!existing?.handled) return reminder;
+		return {
+			...reminder,
+			handled: true,
+			handledAtUtc: existing.handledAtUtc
+		};
+	});
+}
+
 function toDateOnly(value: Date | string | null): string | null {
 	if (!value) return null;
 	if (value instanceof Date) return value.toISOString().slice(0, 10);
 	if (typeof value === 'string') return value.slice(0, 10);
 	return null;
+}
+
+function eventVersionStamp(row: ExistingEventScopeRow): string {
+	const eventId = Number(row.EventId);
+	const userOid = row.UserOid?.trim() ?? '';
+	const employeeTypeId =
+		row.ShiftId === null || row.ShiftId === undefined ? '' : String(Number(row.ShiftId));
+	const startDate = toDateOnly(row.StartDate) ?? '';
+	const endDate = toDateOnly(row.EndDate) ?? '';
+	const coverageCodeId =
+		row.EventCodeId === null || row.EventCodeId === undefined
+			? ''
+			: String(Number(row.EventCodeId));
+	const customCode = row.CustomCode?.trim() ?? '';
+	const customName = row.CustomName?.trim() ?? '';
+	const customDisplayMode = row.CustomDisplayMode?.trim() ?? '';
+	const customColor = row.CustomColor?.trim().toLowerCase() ?? '';
+	const notes = row.Notes?.trim() ?? '';
+	const scheduledRemindersJson = row.ScheduledRemindersJson?.trim() ?? '';
+	return [
+		eventId,
+		userOid,
+		employeeTypeId,
+		startDate,
+		endDate,
+		coverageCodeId,
+		customCode,
+		customName,
+		customDisplayMode,
+		customColor,
+		notes,
+		scheduledRemindersJson
+	].join('|');
 }
 
 async function getScheduleEventsCapabilities(
@@ -289,27 +400,30 @@ async function getScheduleEventsCapabilities(
 		(result.recordset as Array<{ COLUMN_NAME: string }>).map((row) => row.COLUMN_NAME)
 	);
 	return {
-		hasEmployeeTypeId: columns.has('EmployeeTypeId'),
+		hasShiftId: columns.has('ShiftId'),
 		hasCustomColumns:
 			columns.has('CustomCode') &&
 			columns.has('CustomName') &&
 			columns.has('CustomDisplayMode') &&
 			columns.has('CustomColor'),
-		hasReminderColumns:
-			columns.has('NotifyImmediately') && columns.has('ScheduledRemindersJson')
+		hasReminderColumns: columns.has('ScheduledRemindersJson')
 	};
 }
 
-async function ensureShiftScopeIsValid(pool: Awaited<ReturnType<typeof GetPool>>, scheduleId: number, employeeTypeId: number) {
+async function ensureShiftScopeIsValid(
+	pool: Awaited<ReturnType<typeof GetPool>>,
+	scheduleId: number,
+	employeeTypeId: number
+) {
 	const shiftResult = await pool
 		.request()
 		.input('scheduleId', scheduleId)
 		.input('employeeTypeId', employeeTypeId)
 		.query(
 			`SELECT TOP (1) 1 AS HasShift
-			 FROM dbo.EmployeeTypes
+			 FROM dbo.Shifts
 			 WHERE ScheduleId = @scheduleId
-			   AND EmployeeTypeId = @employeeTypeId
+			   AND ShiftId = @employeeTypeId
 			   AND IsActive = 1
 			   AND DeletedAt IS NULL;`
 		);
@@ -318,7 +432,11 @@ async function ensureShiftScopeIsValid(pool: Awaited<ReturnType<typeof GetPool>>
 	}
 }
 
-async function ensureUserScopeIsValid(pool: Awaited<ReturnType<typeof GetPool>>, scheduleId: number, userOid: string) {
+async function ensureUserScopeIsValid(
+	pool: Awaited<ReturnType<typeof GetPool>>,
+	scheduleId: number,
+	userOid: string
+) {
 	const userResult = await pool
 		.request()
 		.input('scheduleId', scheduleId)
@@ -345,9 +463,9 @@ async function ensureCoverageCodeIsValid(
 		.input('coverageCodeId', coverageCodeId)
 		.query(
 			`SELECT TOP (1) 1 AS HasCode
-			 FROM dbo.CoverageCodes
+			 FROM dbo.EventCodes
 			 WHERE ScheduleId = @scheduleId
-			   AND CoverageCodeId = @coverageCodeId
+			   AND EventCodeId = @coverageCodeId
 			   AND IsActive = 1
 			   AND DeletedAt IS NULL;`
 		);
@@ -373,13 +491,16 @@ function formatEventDateForEmail(startDate: string, endDate: string): string {
 }
 
 async function getEventEmailContext(pool: Awaited<ReturnType<typeof GetPool>>, scheduleId: number) {
-	const result = await pool.request().input('scheduleId', scheduleId).query(
-		`SELECT TOP (1)
+	const result = await pool
+		.request()
+		.input('scheduleId', scheduleId)
+		.query(
+			`SELECT TOP (1)
 			s.Name AS ScheduleName,
 			s.ThemeJson AS ScheduleThemeJson
 		 FROM dbo.Schedules s
 		 WHERE s.ScheduleId = @scheduleId;`
-	);
+		);
 	const row = result.recordset?.[0] as
 		| {
 				ScheduleName: string | null;
@@ -438,14 +559,14 @@ async function getAffectedEventMemberNames(params: {
 				`SELECT DISTINCT
 					COALESCE(NULLIF(LTRIM(RTRIM(u.DisplayName)), ''), NULLIF(LTRIM(RTRIM(u.FullName)), ''), u.UserOid) AS MemberName,
 					NULLIF(LTRIM(RTRIM(u.Email)), '') AS MemberEmail
-				 FROM dbo.ScheduleUserTypes sut
+				 FROM dbo.ScheduleAssignments sut
 				 INNER JOIN dbo.ScheduleUsers su
 				   ON su.ScheduleId = sut.ScheduleId
 				  AND su.UserOid = sut.UserOid
 				 INNER JOIN dbo.Users u
 				   ON u.UserOid = sut.UserOid
 				 WHERE sut.ScheduleId = @scheduleId
-				   AND sut.EmployeeTypeId = @employeeTypeId
+				   AND sut.ShiftId = @employeeTypeId
 				   AND sut.IsActive = 1
 				   AND sut.DeletedAt IS NULL
 				   AND su.IsActive = 1
@@ -455,7 +576,10 @@ async function getAffectedEventMemberNames(params: {
 				 ORDER BY MemberName ASC;`
 			);
 		return (result.recordset as Array<{ MemberName: string | null; MemberEmail: string | null }>)
-			.map((row) => ({ name: row.MemberName?.trim() || '', email: row.MemberEmail?.trim() || null }))
+			.map((row) => ({
+				name: row.MemberName?.trim() || '',
+				email: row.MemberEmail?.trim() || null
+			}))
 			.filter((row) => Boolean(row.name));
 	}
 
@@ -465,10 +589,10 @@ async function getAffectedEventMemberNames(params: {
 		.input('startDate', startDate)
 		.input('endDate', endDate)
 		.query(
-		`SELECT DISTINCT
+			`SELECT DISTINCT
 			COALESCE(NULLIF(LTRIM(RTRIM(u.DisplayName)), ''), NULLIF(LTRIM(RTRIM(u.FullName)), ''), u.UserOid) AS MemberName,
 			NULLIF(LTRIM(RTRIM(u.Email)), '') AS MemberEmail
-		 FROM dbo.ScheduleUserTypes sut
+		 FROM dbo.ScheduleAssignments sut
 		 INNER JOIN dbo.ScheduleUsers su
 		   ON su.ScheduleId = sut.ScheduleId
 		  AND su.UserOid = sut.UserOid
@@ -531,26 +655,49 @@ export const GET: RequestHandler = async ({ locals, cookies, url }) => {
 	}
 
 	const { pool, scheduleId } = await getActorContext(currentUser.id, cookies, 'Member');
-	const day = cleanDateOnly(url.searchParams.get('day'), 'day');
-	const { scope, employeeTypeId, userOid } = await cleanScopeInputs(pool, scheduleId, url.searchParams, {
-		allowUserShiftContext: true
-	});
+	const dayParam = url.searchParams.get('day');
+	const startDateParam = url.searchParams.get('startDate');
+	const endDateParam = url.searchParams.get('endDate');
+	const hasRangeParams = startDateParam !== null || endDateParam !== null;
+	if (hasRangeParams && dayParam !== null) {
+		throw error(400, 'Provide either day or startDate/endDate, not both');
+	}
+	if (hasRangeParams && (startDateParam === null || endDateParam === null)) {
+		throw error(400, 'Both startDate and endDate are required when using range mode');
+	}
+	const day = !hasRangeParams ? cleanDateOnly(dayParam, 'day') : null;
+	const startDate = hasRangeParams ? cleanDateOnly(startDateParam, 'startDate') : null;
+	const endDate = hasRangeParams ? cleanDateOnly(endDateParam, 'endDate') : null;
+	if (startDate !== null && endDate !== null && endDate < startDate) {
+		throw error(400, 'endDate cannot be before startDate');
+	}
+	const { scope, employeeTypeId, userOid } = await cleanScopeInputs(
+		pool,
+		scheduleId,
+		url.searchParams,
+		{
+			allowUserShiftContext: true
+		}
+	);
 	const capabilities = await getScheduleEventsCapabilities(pool);
-	if (scope === 'user' && capabilities.hasEmployeeTypeId && employeeTypeId === null) {
+	if (scope === 'user' && capabilities.hasShiftId && employeeTypeId === null) {
 		throw error(400, 'User scope requires employeeTypeId');
 	}
 
 	const request = pool
 		.request()
 		.input('scheduleId', scheduleId)
-		.input('day', day)
 		.input('scope', scope)
 		.input('employeeTypeId', employeeTypeId)
 		.input('userOid', userOid);
+	if (day !== null) {
+		request.input('day', day);
+	}
+	if (startDate !== null && endDate !== null) {
+		request.input('startDate', startDate).input('endDate', endDate);
+	}
 
-	const selectEmployeeTypeId = capabilities.hasEmployeeTypeId
-		? 'se.EmployeeTypeId'
-		: 'CAST(NULL AS int) AS EmployeeTypeId';
+	const selectShiftId = capabilities.hasShiftId ? 'se.ShiftId' : 'CAST(NULL AS int) AS ShiftId';
 	const selectCustomCode = capabilities.hasCustomColumns
 		? 'se.CustomCode'
 		: 'CAST(NULL AS nvarchar(16)) AS CustomCode';
@@ -559,26 +706,24 @@ export const GET: RequestHandler = async ({ locals, cookies, url }) => {
 		: 'CAST(NULL AS nvarchar(100)) AS CustomName';
 	const selectCustomDisplayMode = capabilities.hasCustomColumns
 		? 'se.CustomDisplayMode'
-		: "CAST(NULL AS nvarchar(30)) AS CustomDisplayMode";
+		: 'CAST(NULL AS nvarchar(30)) AS CustomDisplayMode';
 	const selectCustomColor = capabilities.hasCustomColumns
 		? 'se.CustomColor'
 		: 'CAST(NULL AS nvarchar(20)) AS CustomColor';
-	const selectNotifyImmediately = capabilities.hasReminderColumns
-		? 'se.NotifyImmediately'
-		: 'CAST(0 AS bit) AS NotifyImmediately';
+	const selectNotifyImmediately = 'CAST(0 AS bit) AS NotifyImmediately';
 	const selectScheduledRemindersJson = capabilities.hasReminderColumns
 		? 'se.ScheduledRemindersJson'
 		: 'CAST(NULL AS nvarchar(max)) AS ScheduledRemindersJson';
-	const globalPredicate = capabilities.hasEmployeeTypeId
-		? '(se.EmployeeTypeId IS NULL AND se.UserOid IS NULL)'
+	const globalPredicate = capabilities.hasShiftId
+		? '(se.ShiftId IS NULL AND se.UserOid IS NULL)'
 		: '(se.UserOid IS NULL)';
-	const shiftPredicate = capabilities.hasEmployeeTypeId
-		? '(se.EmployeeTypeId = @employeeTypeId AND se.UserOid IS NULL)'
+	const shiftPredicate = capabilities.hasShiftId
+		? '(se.ShiftId = @employeeTypeId AND se.UserOid IS NULL)'
 		: '(1 = 0)';
-	const userPredicate = capabilities.hasEmployeeTypeId
+	const userPredicate = capabilities.hasShiftId
 		? employeeTypeId !== null
-			? '(se.UserOid = @userOid AND se.EmployeeTypeId = @employeeTypeId)'
-			: '(se.UserOid = @userOid AND se.EmployeeTypeId IS NULL)'
+			? '(se.UserOid = @userOid AND se.ShiftId = @employeeTypeId)'
+			: '(se.UserOid = @userOid AND se.ShiftId IS NULL)'
 		: '(se.UserOid = @userOid)';
 
 	const scopePredicate =
@@ -586,9 +731,14 @@ export const GET: RequestHandler = async ({ locals, cookies, url }) => {
 			? globalPredicate
 			: scope === 'shift'
 				? `(${shiftPredicate} OR ${globalPredicate})`
-				: capabilities.hasEmployeeTypeId && employeeTypeId !== null
+				: capabilities.hasShiftId && employeeTypeId !== null
 					? `(${userPredicate} OR ${shiftPredicate} OR ${globalPredicate})`
 					: `(${userPredicate} OR ${globalPredicate})`;
+
+	const windowPredicate =
+		day !== null
+			? 'se.StartDate <= @day AND se.EndDate >= @day'
+			: 'se.StartDate <= @endDate AND se.EndDate >= @startDate';
 
 	const result = await request.query(
 		`SELECT
@@ -597,8 +747,8 @@ export const GET: RequestHandler = async ({ locals, cookies, url }) => {
 			se.StartDate,
 			se.EndDate,
 			se.Notes,
-			se.CoverageCodeId,
-			${selectEmployeeTypeId},
+			se.EventCodeId,
+			${selectShiftId},
 			${selectCustomCode},
 			${selectCustomName},
 			${selectCustomDisplayMode},
@@ -610,27 +760,28 @@ export const GET: RequestHandler = async ({ locals, cookies, url }) => {
 			cc.DisplayMode AS CoverageDisplayMode,
 			cc.Color AS CoverageColor
 		 FROM dbo.ScheduleEvents se
-		 LEFT JOIN dbo.CoverageCodes cc
+		 LEFT JOIN dbo.EventCodes cc
 		   ON cc.ScheduleId = se.ScheduleId
-		  AND cc.CoverageCodeId = se.CoverageCodeId
+		  AND cc.EventCodeId = se.EventCodeId
 		  AND cc.DeletedAt IS NULL
 		 WHERE se.ScheduleId = @scheduleId
 		   AND se.IsActive = 1
 		   AND se.DeletedAt IS NULL
-		   AND se.StartDate <= @day
-		   AND se.EndDate >= @day
+		   AND ${windowPredicate}
 		   AND ${scopePredicate}
 		 ORDER BY se.StartDate ASC, se.EndDate ASC, se.EventId ASC;`
 	);
 
 	const events = (result.recordset as ScheduleEventRow[]).map((row) => {
-		const coverageCodeId = row.CoverageCodeId === null ? null : Number(row.CoverageCodeId);
+		const coverageCodeId = row.EventCodeId === null ? null : Number(row.EventCodeId);
 		const employeeTypeId =
-			row.EmployeeTypeId === null || row.EmployeeTypeId === undefined
-				? null
-				: Number(row.EmployeeTypeId);
+			row.ShiftId === null || row.ShiftId === undefined ? null : Number(row.ShiftId);
 		const userOid = row.UserOid?.trim() || null;
-		const scopeType: EventScopeType = userOid ? 'user' : employeeTypeId !== null ? 'shift' : 'global';
+		const scopeType: EventScopeType = userOid
+			? 'user'
+			: employeeTypeId !== null
+				? 'shift'
+				: 'global';
 		const isCustom = coverageCodeId === null;
 		const eventCodeCode = (coverageCodeId ? row.CoverageCode : row.CustomCode)?.trim() || '';
 		const fallbackName = eventCodeCode || 'Event';
@@ -651,6 +802,21 @@ export const GET: RequestHandler = async ({ locals, cookies, url }) => {
 			startDate: toDateOnly(row.StartDate) ?? '',
 			endDate: toDateOnly(row.EndDate) ?? '',
 			comments: row.Notes?.trim() ?? '',
+			versionStamp: eventVersionStamp({
+				EventId: Number(row.EventId),
+				UserOid: row.UserOid,
+				ShiftId: row.ShiftId === null || row.ShiftId === undefined ? null : Number(row.ShiftId),
+				StartDate: row.StartDate,
+				EndDate: row.EndDate,
+				Notes: row.Notes,
+				EventCodeId: row.EventCodeId,
+				CustomCode: row.CustomCode,
+				CustomName: row.CustomName,
+				CustomDisplayMode: row.CustomDisplayMode,
+				CustomColor: row.CustomColor,
+				NotifyImmediately: row.NotifyImmediately,
+				ScheduledRemindersJson: row.ScheduledRemindersJson
+			}),
 			isCustom,
 			notifyImmediately: Boolean(row.NotifyImmediately),
 			scheduledReminders: parseScheduledRemindersJson(row.ScheduledRemindersJson)
@@ -666,7 +832,11 @@ export const POST: RequestHandler = async ({ locals, cookies, request }) => {
 		throw error(401, 'Unauthorized');
 	}
 
-	const { pool, scheduleId, actorOid } = await getActorContext(currentUser.id, cookies, 'Maintainer');
+	const { pool, scheduleId, actorOid } = await getActorContext(
+		currentUser.id,
+		cookies,
+		'Maintainer'
+	);
 	const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
 	if (!body || typeof body !== 'object') {
 		throw error(400, 'Body is invalid');
@@ -676,10 +846,10 @@ export const POST: RequestHandler = async ({ locals, cookies, request }) => {
 	const { scope, employeeTypeId, userOid } = await cleanScopeInputs(pool, scheduleId, body, {
 		allowUserShiftContext: true
 	});
-	if (employeeTypeId !== null && !capabilities.hasEmployeeTypeId) {
+	if (employeeTypeId !== null && !capabilities.hasShiftId) {
 		throw error(400, 'Shift-scoped events require a ScheduleEvents schema update.');
 	}
-	if (scope === 'user' && capabilities.hasEmployeeTypeId && employeeTypeId === null) {
+	if (scope === 'user' && capabilities.hasShiftId && employeeTypeId === null) {
 		throw error(400, 'User scope requires employeeTypeId');
 	}
 	const startDate = cleanDateOnly(body.startDate, 'Start date');
@@ -691,7 +861,10 @@ export const POST: RequestHandler = async ({ locals, cookies, request }) => {
 	const comments = cleanOptionalComments(body.comments);
 	const coverageCodeId = cleanOptionalInt(body.coverageCodeId, 'Event code');
 	const hasNotifyImmediatelyInput = Object.prototype.hasOwnProperty.call(body, 'notifyImmediately');
-	const hasScheduledRemindersInput = Object.prototype.hasOwnProperty.call(body, 'scheduledReminders');
+	const hasScheduledRemindersInput = Object.prototype.hasOwnProperty.call(
+		body,
+		'scheduledReminders'
+	);
 	let notifyImmediately = cleanNotifyImmediately(
 		hasNotifyImmediatelyInput ? body.notifyImmediately : undefined
 	);
@@ -713,25 +886,28 @@ export const POST: RequestHandler = async ({ locals, cookies, request }) => {
 			.input('coverageCodeId', coverageCodeId)
 			.query(
 				`SELECT TOP (1) Label, Code
-				 FROM dbo.CoverageCodes
+				 FROM dbo.EventCodes
 				 WHERE ScheduleId = @scheduleId
-				   AND CoverageCodeId = @coverageCodeId
+				   AND EventCodeId = @coverageCodeId
 				   AND DeletedAt IS NULL;`
 			);
 		notificationEventName =
 			codeResult.recordset?.[0]?.Label?.trim() ||
 			codeResult.recordset?.[0]?.Code?.trim() ||
 			'Event';
-		if (capabilities.hasReminderColumns && (!hasNotifyImmediatelyInput || !hasScheduledRemindersInput)) {
+		if (
+			capabilities.hasReminderColumns &&
+			(!hasNotifyImmediatelyInput || !hasScheduledRemindersInput)
+		) {
 			const defaultsResult = await pool
 				.request()
 				.input('scheduleId', scheduleId)
 				.input('coverageCodeId', coverageCodeId)
 				.query(
 					`SELECT TOP (1) NotifyImmediately, ScheduledRemindersJson
-					 FROM dbo.CoverageCodes
+					 FROM dbo.EventCodes
 					 WHERE ScheduleId = @scheduleId
-					   AND CoverageCodeId = @coverageCodeId
+					   AND EventCodeId = @coverageCodeId
 					   AND DeletedAt IS NULL;`
 				);
 			const defaultRow = defaultsResult.recordset?.[0] as
@@ -741,7 +917,9 @@ export const POST: RequestHandler = async ({ locals, cookies, request }) => {
 				notifyImmediately = Boolean(defaultRow?.NotifyImmediately);
 			}
 			if (!hasScheduledRemindersInput) {
-				scheduledReminders = parseScheduledRemindersJson(defaultRow?.ScheduledRemindersJson ?? null);
+				scheduledReminders = parseScheduledRemindersJson(
+					defaultRow?.ScheduledRemindersJson ?? null
+				);
 			}
 		}
 	} else {
@@ -760,12 +938,32 @@ export const POST: RequestHandler = async ({ locals, cookies, request }) => {
 		customName = cleanOptionalCustomName(body.customName, customCode);
 		notificationEventName = customName || customCode || 'Custom Event';
 	}
+	scheduledReminders = mergeReminderHandlingFromExisting(
+		scheduledReminders,
+		null
+	);
 	const scheduledRemindersJson = remindersToJson(scheduledReminders);
 
-	const insertColumns = ['ScheduleId', 'UserOid', 'StartDate', 'EndDate', 'CoverageCodeId', 'Notes', 'CreatedBy'];
-	const insertValues = ['@scheduleId', '@userOid', '@startDate', '@endDate', '@coverageCodeId', '@comments', '@actorOid'];
-	if (capabilities.hasEmployeeTypeId) {
-		insertColumns.splice(2, 0, 'EmployeeTypeId');
+	const insertColumns = [
+		'ScheduleId',
+		'UserOid',
+		'StartDate',
+		'EndDate',
+		'EventCodeId',
+		'Notes',
+		'CreatedBy'
+	];
+	const insertValues = [
+		'@scheduleId',
+		'@userOid',
+		'@startDate',
+		'@endDate',
+		'@coverageCodeId',
+		'@comments',
+		'@actorOid'
+	];
+	if (capabilities.hasShiftId) {
+		insertColumns.splice(2, 0, 'ShiftId');
 		insertValues.splice(2, 0, '@employeeTypeId');
 	}
 	if (capabilities.hasCustomColumns) {
@@ -773,8 +971,8 @@ export const POST: RequestHandler = async ({ locals, cookies, request }) => {
 		insertValues.splice(5, 0, '@customCode', '@customName', '@customDisplayMode', '@customColor');
 	}
 	if (capabilities.hasReminderColumns) {
-		insertColumns.splice(6, 0, 'NotifyImmediately', 'ScheduledRemindersJson');
-		insertValues.splice(6, 0, '@notifyImmediately', '@scheduledRemindersJson');
+		insertColumns.splice(6, 0, 'ScheduledRemindersJson');
+		insertValues.splice(6, 0, '@scheduledRemindersJson');
 	}
 
 	const insertResult = await pool
@@ -789,7 +987,6 @@ export const POST: RequestHandler = async ({ locals, cookies, request }) => {
 		.input('customName', customName)
 		.input('customDisplayMode', customDisplayMode)
 		.input('customColor', customColor)
-		.input('notifyImmediately', notifyImmediately)
 		.input('scheduledRemindersJson', scheduledRemindersJson)
 		.input('comments', comments || null)
 		.input('actorOid', actorOid)
@@ -801,7 +998,7 @@ export const POST: RequestHandler = async ({ locals, cookies, request }) => {
 
 	const eventId = Number(insertResult.recordset?.[0]?.EventId ?? 0);
 
-	if (notifyImmediately) {
+	if (notifyImmediately && eventRangeIsNotEntirelyPast(endDate)) {
 		try {
 			const context = await getEventEmailContext(pool, scheduleId);
 			if (context) {
@@ -855,9 +1052,31 @@ export const PATCH: RequestHandler = async ({ locals, cookies, request }) => {
 
 	const capabilities = await getScheduleEventsCapabilities(pool);
 	const eventId = cleanOptionalInt(body.eventId, 'Event');
+	const expectedVersionStamp = cleanRequiredVersionStamp(
+		body.expectedVersionStamp,
+		'Version stamp'
+	);
 	if (!eventId) {
 		throw error(400, 'Event is invalid');
 	}
+
+	const existingQueryShiftId = capabilities.hasShiftId ? 'ShiftId' : 'CAST(NULL AS int) AS ShiftId';
+	const existingQueryCustomCode = capabilities.hasCustomColumns
+		? 'CustomCode'
+		: 'CAST(NULL AS nvarchar(16)) AS CustomCode';
+	const existingQueryCustomName = capabilities.hasCustomColumns
+		? 'CustomName'
+		: 'CAST(NULL AS nvarchar(100)) AS CustomName';
+	const existingQueryCustomDisplayMode = capabilities.hasCustomColumns
+		? 'CustomDisplayMode'
+		: 'CAST(NULL AS nvarchar(30)) AS CustomDisplayMode';
+	const existingQueryCustomColor = capabilities.hasCustomColumns
+		? 'CustomColor'
+		: 'CAST(NULL AS nvarchar(20)) AS CustomColor';
+	const existingQueryNotifyImmediately = 'CAST(0 AS bit) AS NotifyImmediately';
+	const existingQueryScheduledRemindersJson = capabilities.hasReminderColumns
+		? 'ScheduledRemindersJson'
+		: 'CAST(NULL AS nvarchar(max)) AS ScheduledRemindersJson';
 
 	const existsResult = await pool
 		.request()
@@ -867,7 +1086,17 @@ export const PATCH: RequestHandler = async ({ locals, cookies, request }) => {
 			`SELECT TOP (1)
 				EventId,
 				UserOid,
-				${capabilities.hasEmployeeTypeId ? 'EmployeeTypeId' : 'CAST(NULL AS int) AS EmployeeTypeId'}
+				${existingQueryShiftId},
+				StartDate,
+				EndDate,
+				Notes,
+				EventCodeId,
+				${existingQueryCustomCode},
+				${existingQueryCustomName},
+				${existingQueryCustomDisplayMode},
+				${existingQueryCustomColor},
+				${existingQueryNotifyImmediately},
+				${existingQueryScheduledRemindersJson}
 			 FROM dbo.ScheduleEvents
 			 WHERE ScheduleId = @scheduleId
 			   AND EventId = @eventId
@@ -878,12 +1107,16 @@ export const PATCH: RequestHandler = async ({ locals, cookies, request }) => {
 	if (!existingEvent?.EventId) {
 		throw error(404, 'Event not found');
 	}
+	const currentVersionStamp = eventVersionStamp(existingEvent);
+	if (currentVersionStamp !== expectedVersionStamp) {
+		throw error(409, 'This event has changed. Refresh and try again.');
+	}
 
 	const userOid = existingEvent.UserOid?.trim() || null;
 	const employeeTypeId =
-		existingEvent.EmployeeTypeId === null || existingEvent.EmployeeTypeId === undefined
+		existingEvent.ShiftId === null || existingEvent.ShiftId === undefined
 			? null
-			: Number(existingEvent.EmployeeTypeId);
+			: Number(existingEvent.ShiftId);
 
 	const startDate = cleanDateOnly(body.startDate, 'Start date');
 	const endDate = cleanDateOnly(body.endDate, 'End date');
@@ -894,7 +1127,10 @@ export const PATCH: RequestHandler = async ({ locals, cookies, request }) => {
 	const comments = cleanOptionalComments(body.comments);
 	const coverageCodeId = cleanOptionalInt(body.coverageCodeId, 'Event code');
 	const hasNotifyImmediatelyInput = Object.prototype.hasOwnProperty.call(body, 'notifyImmediately');
-	const hasScheduledRemindersInput = Object.prototype.hasOwnProperty.call(body, 'scheduledReminders');
+	const hasScheduledRemindersInput = Object.prototype.hasOwnProperty.call(
+		body,
+		'scheduledReminders'
+	);
 	let notifyImmediately = cleanNotifyImmediately(
 		hasNotifyImmediatelyInput ? body.notifyImmediately : undefined
 	);
@@ -916,25 +1152,28 @@ export const PATCH: RequestHandler = async ({ locals, cookies, request }) => {
 			.input('coverageCodeId', coverageCodeId)
 			.query(
 				`SELECT TOP (1) Label, Code
-				 FROM dbo.CoverageCodes
+				 FROM dbo.EventCodes
 				 WHERE ScheduleId = @scheduleId
-				   AND CoverageCodeId = @coverageCodeId
+				   AND EventCodeId = @coverageCodeId
 				   AND DeletedAt IS NULL;`
 			);
 		notificationEventName =
 			codeResult.recordset?.[0]?.Label?.trim() ||
 			codeResult.recordset?.[0]?.Code?.trim() ||
 			'Event';
-		if (capabilities.hasReminderColumns && (!hasNotifyImmediatelyInput || !hasScheduledRemindersInput)) {
+		if (
+			capabilities.hasReminderColumns &&
+			(!hasNotifyImmediatelyInput || !hasScheduledRemindersInput)
+		) {
 			const defaultsResult = await pool
 				.request()
 				.input('scheduleId', scheduleId)
 				.input('coverageCodeId', coverageCodeId)
 				.query(
 					`SELECT TOP (1) NotifyImmediately, ScheduledRemindersJson
-					 FROM dbo.CoverageCodes
+					 FROM dbo.EventCodes
 					 WHERE ScheduleId = @scheduleId
-					   AND CoverageCodeId = @coverageCodeId
+					   AND EventCodeId = @coverageCodeId
 					   AND DeletedAt IS NULL;`
 				);
 			const defaultRow = defaultsResult.recordset?.[0] as
@@ -944,7 +1183,9 @@ export const PATCH: RequestHandler = async ({ locals, cookies, request }) => {
 				notifyImmediately = Boolean(defaultRow?.NotifyImmediately);
 			}
 			if (!hasScheduledRemindersInput) {
-				scheduledReminders = parseScheduledRemindersJson(defaultRow?.ScheduledRemindersJson ?? null);
+				scheduledReminders = parseScheduledRemindersJson(
+					defaultRow?.ScheduledRemindersJson ?? null
+				);
 			}
 		}
 	} else {
@@ -969,20 +1210,57 @@ export const PATCH: RequestHandler = async ({ locals, cookies, request }) => {
 		'UserOid = @userOid',
 		'StartDate = @startDate',
 		'EndDate = @endDate',
-		'CoverageCodeId = @coverageCodeId',
+		'EventCodeId = @coverageCodeId',
 		'Notes = @comments'
 	];
-	if (capabilities.hasEmployeeTypeId) {
-		setClauses.splice(1, 0, 'EmployeeTypeId = @employeeTypeId');
+	if (capabilities.hasShiftId) {
+		setClauses.splice(1, 0, 'ShiftId = @employeeTypeId');
 	}
 	if (capabilities.hasCustomColumns) {
-		setClauses.splice(4, 0, 'CustomCode = @customCode', 'CustomName = @customName', 'CustomDisplayMode = @customDisplayMode', 'CustomColor = @customColor');
+		setClauses.splice(
+			4,
+			0,
+			'CustomCode = @customCode',
+			'CustomName = @customName',
+			'CustomDisplayMode = @customDisplayMode',
+			'CustomColor = @customColor'
+		);
 	}
 	if (capabilities.hasReminderColumns) {
-		setClauses.push('NotifyImmediately = @notifyImmediately', 'ScheduledRemindersJson = @scheduledRemindersJson');
+		setClauses.push('ScheduledRemindersJson = @scheduledRemindersJson');
 	}
 
-	await pool
+	const whereClauses = [
+		'ScheduleId = @scheduleId',
+		'EventId = @eventId',
+		'IsActive = 1',
+		'DeletedAt IS NULL',
+		'((UserOid IS NULL AND @originalUserOid IS NULL) OR UserOid = @originalUserOid)',
+		'((EventCodeId IS NULL AND @originalEventCodeId IS NULL) OR EventCodeId = @originalEventCodeId)',
+		'StartDate = @originalStartDate',
+		'EndDate = @originalEndDate',
+		"ISNULL(LTRIM(RTRIM(Notes)), N'') = ISNULL(@originalNotes, N'')"
+	];
+	if (capabilities.hasShiftId) {
+		whereClauses.push(
+			'((ShiftId IS NULL AND @originalShiftId IS NULL) OR ShiftId = @originalShiftId)'
+		);
+	}
+	if (capabilities.hasCustomColumns) {
+		whereClauses.push(
+			"ISNULL(LTRIM(RTRIM(CustomCode)), N'') = ISNULL(@originalCustomCode, N'')",
+			"ISNULL(LTRIM(RTRIM(CustomName)), N'') = ISNULL(@originalCustomName, N'')",
+			"ISNULL(LTRIM(RTRIM(CustomDisplayMode)), N'') = ISNULL(@originalCustomDisplayMode, N'')",
+			"ISNULL(LOWER(LTRIM(RTRIM(CustomColor))), N'') = ISNULL(@originalCustomColor, N'')"
+		);
+	}
+	if (capabilities.hasReminderColumns) {
+		whereClauses.push(
+			"ISNULL(ScheduledRemindersJson, N'') = ISNULL(@originalScheduledRemindersJson, N'')"
+		);
+	}
+
+	const updateResult = await pool
 		.request()
 		.input('scheduleId', scheduleId)
 		.input('eventId', eventId)
@@ -995,20 +1273,45 @@ export const PATCH: RequestHandler = async ({ locals, cookies, request }) => {
 		.input('customName', customName)
 		.input('customDisplayMode', customDisplayMode)
 		.input('customColor', customColor)
-		.input('notifyImmediately', notifyImmediately)
 		.input('scheduledRemindersJson', scheduledRemindersJson)
 		.input('comments', comments || null)
+		.input('originalUserOid', existingEvent.UserOid?.trim() || null)
+		.input(
+			'originalShiftId',
+			existingEvent.ShiftId === null || existingEvent.ShiftId === undefined
+				? null
+				: Number(existingEvent.ShiftId)
+		)
+		.input('originalStartDate', toDateOnly(existingEvent.StartDate))
+		.input('originalEndDate', toDateOnly(existingEvent.EndDate))
+		.input(
+			'originalEventCodeId',
+			existingEvent.EventCodeId === null ? null : Number(existingEvent.EventCodeId)
+		)
+		.input('originalNotes', existingEvent.Notes?.trim() || null)
+		.input('originalCustomCode', existingEvent.CustomCode?.trim() || null)
+		.input('originalCustomName', existingEvent.CustomName?.trim() || null)
+		.input('originalCustomDisplayMode', existingEvent.CustomDisplayMode?.trim() || null)
+		.input('originalCustomColor', existingEvent.CustomColor?.trim().toLowerCase() || null)
+		.input('originalScheduledRemindersJson', existingEvent.ScheduledRemindersJson?.trim() || null)
 		.query(
 			`UPDATE dbo.ScheduleEvents
 			 SET ${setClauses.join(', ')}
-			 WHERE ScheduleId = @scheduleId
-			   AND EventId = @eventId
-			   AND IsActive = 1
-			   AND DeletedAt IS NULL;`
-		);
+			 WHERE ${whereClauses.join('\n			   AND ')};
 
-	if (notifyImmediately) {
-		const scopeType: EventScopeType = userOid ? 'user' : employeeTypeId !== null ? 'shift' : 'global';
+			 SELECT @@ROWCOUNT AS UpdatedRows;`
+		);
+	const updatedRows = Number(updateResult.recordset?.[0]?.UpdatedRows ?? 0);
+	if (updatedRows < 1) {
+		throw error(409, 'This event has changed. Refresh and try again.');
+	}
+
+	if (notifyImmediately && eventRangeIsNotEntirelyPast(endDate)) {
+		const scopeType: EventScopeType = userOid
+			? 'user'
+			: employeeTypeId !== null
+				? 'shift'
+				: 'global';
 		try {
 			const context = await getEventEmailContext(pool, scheduleId);
 			if (context) {
@@ -1061,23 +1364,88 @@ export const DELETE: RequestHandler = async ({ locals, cookies, request }) => {
 	}
 
 	const eventId = cleanOptionalInt(body.eventId, 'Event');
+	const expectedVersionStamp = cleanRequiredVersionStamp(
+		body.expectedVersionStamp,
+		'Version stamp'
+	);
 	if (!eventId) {
 		throw error(400, 'Event is invalid');
 	}
+	const capabilities = await getScheduleEventsCapabilities(pool);
+	const existingQueryShiftId = capabilities.hasShiftId ? 'ShiftId' : 'CAST(NULL AS int) AS ShiftId';
+	const existingQueryCustomCode = capabilities.hasCustomColumns
+		? 'CustomCode'
+		: 'CAST(NULL AS nvarchar(16)) AS CustomCode';
+	const existingQueryCustomName = capabilities.hasCustomColumns
+		? 'CustomName'
+		: 'CAST(NULL AS nvarchar(100)) AS CustomName';
+	const existingQueryCustomDisplayMode = capabilities.hasCustomColumns
+		? 'CustomDisplayMode'
+		: 'CAST(NULL AS nvarchar(30)) AS CustomDisplayMode';
+	const existingQueryCustomColor = capabilities.hasCustomColumns
+		? 'CustomColor'
+		: 'CAST(NULL AS nvarchar(20)) AS CustomColor';
+	const existingQueryNotifyImmediately = 'CAST(0 AS bit) AS NotifyImmediately';
+	const existingQueryScheduledRemindersJson = capabilities.hasReminderColumns
+		? 'ScheduledRemindersJson'
+		: 'CAST(NULL AS nvarchar(max)) AS ScheduledRemindersJson';
 
-	const result = await pool
-		.request()
-		.input('scheduleId', scheduleId)
-		.input('eventId', eventId)
-		.query(
-			`DELETE FROM dbo.ScheduleEvents
-			 OUTPUT DELETED.EventId
-			 WHERE ScheduleId = @scheduleId
-			   AND EventId = @eventId;`
-		);
+	const tx = new sql.Transaction(pool);
+	await tx.begin();
+	try {
+		const existsResult = await new sql.Request(tx)
+			.input('scheduleId', scheduleId)
+			.input('eventId', eventId)
+			.query(
+				`SELECT TOP (1)
+					EventId,
+					UserOid,
+					${existingQueryShiftId},
+					StartDate,
+					EndDate,
+					Notes,
+					EventCodeId,
+					${existingQueryCustomCode},
+					${existingQueryCustomName},
+					${existingQueryCustomDisplayMode},
+					${existingQueryCustomColor},
+					${existingQueryNotifyImmediately},
+					${existingQueryScheduledRemindersJson}
+				 FROM dbo.ScheduleEvents WITH (UPDLOCK, HOLDLOCK)
+				 WHERE ScheduleId = @scheduleId
+				   AND EventId = @eventId
+				   AND IsActive = 1
+				   AND DeletedAt IS NULL;`
+			);
+		const existingEvent =
+			(existsResult.recordset?.[0] as ExistingEventScopeRow | undefined) ?? null;
+		if (!existingEvent?.EventId) {
+			throw error(404, 'Event not found');
+		}
+		const currentVersionStamp = eventVersionStamp(existingEvent);
+		if (currentVersionStamp !== expectedVersionStamp) {
+			throw error(409, 'This event has changed. Refresh and try again.');
+		}
 
-	if (!result.recordset?.[0]?.EventId) {
-		throw error(404, 'Event not found');
+		const result = await new sql.Request(tx)
+			.input('scheduleId', scheduleId)
+			.input('eventId', eventId)
+			.query(
+				`DELETE FROM dbo.ScheduleEvents
+				 OUTPUT DELETED.EventId
+				 WHERE ScheduleId = @scheduleId
+				   AND EventId = @eventId
+				   AND IsActive = 1
+				   AND DeletedAt IS NULL;`
+			);
+
+		if (!result.recordset?.[0]?.EventId) {
+			throw error(409, 'This event has changed. Refresh and try again.');
+		}
+		await tx.commit();
+	} catch (e) {
+		await tx.rollback();
+		throw e;
 	}
 
 	return json({ success: true });

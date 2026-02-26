@@ -1,0 +1,4 @@
+Shift Patterns Menu
+Use the Shift Patterns menu to view and manage pattern definitions used by shifts.
+
+Patterns control the recurring coloring used in schedule generation and display.

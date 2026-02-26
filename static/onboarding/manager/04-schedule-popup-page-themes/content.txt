@@ -1,0 +1,7 @@
+Page Theme Colors
+
+Clicking the "Themes" button will expand the customizable themes menu.
+
+Use Page Theme settings to control the overall page appearance.
+These colors affect the broader shell and page-level surfaces around the schedule content.
+Adjust values to preview and save to apply the updated page look.

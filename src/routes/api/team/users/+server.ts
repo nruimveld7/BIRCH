@@ -5,6 +5,7 @@ import { getActiveScheduleId } from '$lib/server/auth';
 import sql from 'mssql';
 import type { Cookies } from '@sveltejs/kit';
 import {
+	sendAccessChangedNotification,
 	sendAccessGrantedNotification,
 	sendAccessRemovedNotification
 } from '$lib/server/mail/notifications';
@@ -14,8 +15,10 @@ type ScheduleRole = 'Member' | 'Maintainer' | 'Manager';
 type TeamUserRow = {
 	UserOid: string;
 	Name: string | null;
+	DisplayName: string | null;
 	Email: string | null;
 	RoleName: ScheduleRole;
+	RoleGrantedAt: Date | string | null;
 };
 
 type ActorContext = {
@@ -26,6 +29,7 @@ type ActorContext = {
 
 type EffectiveRoleRow = {
 	RoleName: ScheduleRole;
+	RoleGrantedAt?: Date | string | null;
 };
 
 type ActiveAssignmentCountRow = {
@@ -42,7 +46,32 @@ type ActiveMembershipCountRow = {
 
 type ConfirmRemovalPayload = {
 	confirmActiveAssignmentRemoval?: boolean;
+	expectedVersionStamp?: unknown;
 };
+
+function cleanRequiredVersionStamp(value: unknown, label: string): string {
+	if (typeof value !== 'string') {
+		throw error(400, `${label} is required`);
+	}
+	const trimmed = value.trim();
+	if (!trimmed) {
+		throw error(400, `${label} is required`);
+	}
+	return trimmed.slice(0, 200);
+}
+
+function toDateTimeIso(value: Date | string | null | undefined): string | null {
+	if (!value) return null;
+	if (value instanceof Date) return value.toISOString();
+	if (typeof value !== 'string') return null;
+	const parsed = new Date(value);
+	if (Number.isNaN(parsed.getTime())) return null;
+	return parsed.toISOString();
+}
+
+function userVersionStamp(role: ScheduleRole, roleGrantedAt: Date | string | null | undefined): string {
+	return `${role}|${toDateTimeIso(roleGrantedAt) ?? '0'}`;
+}
 
 type AccessEmailContext = {
 	scheduleName: string;
@@ -64,6 +93,29 @@ function cleanOptionalText(value: unknown, maxLength: number): string | null {
 	const trimmed = value.trim();
 	if (!trimmed) return null;
 	return trimmed.slice(0, maxLength);
+}
+
+function toLastFirstName(params: {
+	name: string | null;
+	givenName: string | null;
+	surname: string | null;
+}): string | null {
+	const given = params.givenName?.trim() ?? '';
+	const surname = params.surname?.trim() ?? '';
+	if (surname && given) return `${surname}, ${given}`;
+
+	const sourceName = params.name?.trim() ?? '';
+	if (!sourceName) return null;
+	if (sourceName.includes(',')) return sourceName;
+
+	const parts = sourceName.split(/\s+/).filter(Boolean);
+	if (parts.length >= 2) {
+		const last = parts[parts.length - 1] ?? '';
+		const first = parts.slice(0, -1).join(' ');
+		if (last && first) return `${last}, ${first}`;
+	}
+
+	return sourceName;
 }
 
 function toDateOnly(value: Date | string | null | undefined): string {
@@ -117,12 +169,12 @@ async function getEffectiveRole(
 	request: sql.Request,
 	scheduleId: number,
 	userOid: string
-): Promise<ScheduleRole | null> {
+): Promise<{ role: ScheduleRole; versionStamp: string } | null> {
 	const result = await request
 		.input('scheduleId', scheduleId)
 		.input('targetUserOid', userOid)
 		.query(
-			`SELECT TOP (1) r.RoleName
+			`SELECT TOP (1) r.RoleName, su.GrantedAt AS RoleGrantedAt
 			 FROM dbo.ScheduleUsers su
 			 INNER JOIN dbo.Roles r
 			   ON r.RoleId = su.RoleId
@@ -140,7 +192,11 @@ async function getEffectiveRole(
 		);
 
 	const row = result.recordset?.[0] as EffectiveRoleRow | undefined;
-	return row?.RoleName ?? null;
+	if (!row?.RoleName) return null;
+	return {
+		role: row.RoleName,
+		versionStamp: userVersionStamp(row.RoleName, row.RoleGrantedAt ?? null)
+	};
 }
 
 async function countManagers(request: sql.Request, scheduleId: number): Promise<number> {
@@ -224,9 +280,29 @@ export const GET: RequestHandler = async ({ locals, cookies }) => {
 			`WITH RankedUsers AS (
 				SELECT
 					su.UserOid,
-					COALESCE(NULLIF(u.DisplayName, ''), NULLIF(u.FullName, ''), su.UserOid) AS Name,
+					COALESCE(
+						NULLIF(LTRIM(RTRIM(u.FullName)), ''),
+						NULLIF(
+							LTRIM(
+								RTRIM(
+									COALESCE(NULLIF(LTRIM(RTRIM(u.EntraFirstName)), ''), '') +
+									CASE
+										WHEN NULLIF(LTRIM(RTRIM(u.EntraFirstName)), '') IS NOT NULL
+										 AND NULLIF(LTRIM(RTRIM(u.EntraLastName)), '') IS NOT NULL
+										THEN ' '
+										ELSE ''
+									END +
+									COALESCE(NULLIF(LTRIM(RTRIM(u.EntraLastName)), ''), '')
+								)
+							),
+							''
+						),
+						su.UserOid
+					) AS Name,
+					NULLIF(LTRIM(RTRIM(u.DisplayName)), '') AS DisplayName,
 					u.Email,
 					r.RoleName,
+					su.GrantedAt AS RoleGrantedAt,
 					ROW_NUMBER() OVER (
 						PARTITION BY su.UserOid
 						ORDER BY
@@ -248,7 +324,7 @@ export const GET: RequestHandler = async ({ locals, cookies }) => {
 				  AND su.IsActive = 1
 				  AND su.DeletedAt IS NULL
 			)
-			SELECT UserOid, Name, Email, RoleName
+			SELECT UserOid, Name, DisplayName, Email, RoleName, RoleGrantedAt
 			FROM RankedUsers
 			WHERE RoleRank = 1
 			ORDER BY Name ASC, UserOid ASC;`
@@ -257,8 +333,10 @@ export const GET: RequestHandler = async ({ locals, cookies }) => {
 	const users = (result.recordset as TeamUserRow[]).map((row) => ({
 		userOid: row.UserOid,
 		name: row.Name?.trim() || row.UserOid,
+		displayName: row.DisplayName?.trim() || '',
 		email: row.Email?.trim() || '',
-		role: row.RoleName
+		role: row.RoleName,
+		versionStamp: userVersionStamp(row.RoleName, row.RoleGrantedAt)
 	}));
 
 	return json({ users });
@@ -274,6 +352,9 @@ export const POST: RequestHandler = async ({ locals, cookies, request }) => {
 	const body = await request.json().catch(() => null);
 	const targetUserOid = cleanOptionalText(body?.userOid, 64);
 	const name = cleanOptionalText(body?.name, 200);
+	const givenName = cleanOptionalText(body?.givenName, 100);
+	const surname = cleanOptionalText(body?.surname, 100);
+	const resolvedName = toLastFirstName({ name, givenName, surname });
 	const email = cleanOptionalText(body?.email, 320);
 	const role = assertRole(body?.role);
 
@@ -289,8 +370,10 @@ export const POST: RequestHandler = async ({ locals, cookies, request }) => {
 		const upsertUserRequest = new sql.Request(tx);
 		await upsertUserRequest
 			.input('userOid', targetUserOid)
-			.input('fullName', name)
-			.input('displayName', name)
+			.input('fullName', resolvedName)
+			.input('displayName', resolvedName)
+			.input('entraFirstName', givenName)
+			.input('entraLastName', surname)
 			.input('email', email)
 			.query(
 				`MERGE dbo.Users AS target
@@ -298,15 +381,21 @@ export const POST: RequestHandler = async ({ locals, cookies, request }) => {
 				 ON target.UserOid = source.UserOid
 				 WHEN MATCHED THEN
 				   UPDATE SET FullName = COALESCE(@fullName, target.FullName),
-							  DisplayName = COALESCE(@displayName, target.DisplayName),
+							  EntraFirstName = COALESCE(@entraFirstName, target.EntraFirstName),
+							  EntraLastName = COALESCE(@entraLastName, target.EntraLastName),
+							  DisplayName = CASE
+								 WHEN NULLIF(LTRIM(RTRIM(target.DisplayName)), '') IS NULL
+								 THEN COALESCE(@displayName, target.DisplayName)
+								 ELSE target.DisplayName
+							  END,
 							  Email = COALESCE(@email, target.Email),
 							  IsActive = 1,
 							  DeletedAt = NULL,
 							  DeletedBy = NULL,
 							  UpdatedAt = SYSUTCDATETIME()
 				 WHEN NOT MATCHED THEN
-				   INSERT (UserOid, FullName, DisplayName, Email)
-				   VALUES (@userOid, @fullName, @displayName, @email);`
+				   INSERT (UserOid, FullName, DisplayName, EntraFirstName, EntraLastName, Email)
+				   VALUES (@userOid, @fullName, @displayName, @entraFirstName, @entraLastName, @email);`
 			);
 
 		const roleIdResult = await new sql.Request(tx).input('roleName', role).query(
@@ -383,7 +472,8 @@ export const POST: RequestHandler = async ({ locals, cookies, request }) => {
 					themeJson: emailContext.scheduleThemeJson,
 					intendedRecipients: emailContext.targetEmail ? [emailContext.targetEmail] : [],
 					targetMemberName: emailContext.targetDisplayName,
-					authorizedByName: emailContext.actorDisplayName
+					authorizedByName: emailContext.actorDisplayName,
+					status: role
 				});
 			} catch (notificationError) {
 				console.error('Access granted notification failed:', notificationError);
@@ -407,6 +497,7 @@ export const PATCH: RequestHandler = async ({ locals, cookies, request }) => {
 	const body = await request.json().catch(() => null);
 	const targetUserOid = cleanOptionalText(body?.userOid, 64);
 	const nextRole = assertRole(body?.role);
+	const expectedVersionStamp = cleanRequiredVersionStamp(body?.expectedVersionStamp, 'Version stamp');
 
 	if (!targetUserOid) {
 		throw error(400, 'Target user is required');
@@ -415,10 +506,14 @@ export const PATCH: RequestHandler = async ({ locals, cookies, request }) => {
 	const tx = new sql.Transaction(pool);
 	await tx.begin();
 	try {
-		const currentRole = await getEffectiveRole(new sql.Request(tx), ctx.scheduleId, targetUserOid);
-		if (!currentRole) {
+		const currentSnapshot = await getEffectiveRole(new sql.Request(tx), ctx.scheduleId, targetUserOid);
+		if (!currentSnapshot) {
 			throw error(404, 'User is not assigned to this schedule');
 		}
+		if (currentSnapshot.versionStamp !== expectedVersionStamp) {
+			throw error(409, 'This user access entry has changed. Refresh and try again.');
+		}
+		const currentRole = currentSnapshot.role;
 
 		assertCanManageRoleChanges(ctx, currentRole, nextRole);
 
@@ -476,8 +571,32 @@ export const PATCH: RequestHandler = async ({ locals, cookies, request }) => {
 				   VALUES (@scheduleId, @targetUserOid, @roleId, @actorUserOid);`
 			);
 
-		await tx.commit();
-		return json({ ok: true });
+			await tx.commit();
+
+			if (currentRole !== nextRole) {
+				const emailContext = await getAccessEmailContext({
+					pool,
+					scheduleId: ctx.scheduleId,
+					targetUserOid,
+					actorUserOid: ctx.userOid
+				});
+				if (emailContext) {
+					try {
+						await sendAccessChangedNotification({
+							scheduleName: emailContext.scheduleName,
+							themeJson: emailContext.scheduleThemeJson,
+							intendedRecipients: emailContext.targetEmail ? [emailContext.targetEmail] : [],
+							targetMemberName: emailContext.targetDisplayName,
+							authorizedByName: emailContext.actorDisplayName,
+							status: nextRole
+						});
+					} catch (notificationError) {
+						console.error('Access changed notification failed:', notificationError);
+					}
+				}
+			}
+
+			return json({ ok: true });
 	} catch (e) {
 		await tx.rollback();
 		throw e;
@@ -493,6 +612,10 @@ export const DELETE: RequestHandler = async ({ locals, cookies, request }) => {
 	const { pool, ctx } = await getActorContext(currentUser.id, cookies);
 	const body = await request.json().catch(() => null);
 	const targetUserOid = cleanOptionalText(body?.userOid, 64);
+	const expectedVersionStamp = cleanRequiredVersionStamp(
+		(body as ConfirmRemovalPayload | null)?.expectedVersionStamp,
+		'Version stamp'
+	);
 	const confirmActiveAssignmentRemoval = cleanBoolean(
 		(body as ConfirmRemovalPayload | null)?.confirmActiveAssignmentRemoval
 	);
@@ -510,10 +633,14 @@ export const DELETE: RequestHandler = async ({ locals, cookies, request }) => {
 			actorUserOid: ctx.userOid
 		});
 
-		const currentRole = await getEffectiveRole(new sql.Request(tx), ctx.scheduleId, targetUserOid);
-		if (!currentRole) {
+		const currentSnapshot = await getEffectiveRole(new sql.Request(tx), ctx.scheduleId, targetUserOid);
+		if (!currentSnapshot) {
 			throw error(404, 'User is not assigned to this schedule');
 		}
+		if (currentSnapshot.versionStamp !== expectedVersionStamp) {
+			throw error(409, 'This user access entry has changed. Refresh and try again.');
+		}
+		const currentRole = currentSnapshot.role;
 
 		if (currentRole === 'Manager' && ctx.role !== 'Manager') {
 			throw error(403, 'Only Managers can remove a Manager user');
@@ -540,7 +667,7 @@ export const DELETE: RequestHandler = async ({ locals, cookies, request }) => {
 			.input('today', today)
 			.query(
 				`SELECT COUNT(*) AS ActiveAssignmentCount
-				 FROM dbo.ScheduleUserTypes sut
+				 FROM dbo.ScheduleAssignments sut
 				 WHERE sut.ScheduleId = @scheduleId
 				   AND sut.UserOid = @targetUserOid
 				   AND sut.IsActive = 1
@@ -566,7 +693,7 @@ export const DELETE: RequestHandler = async ({ locals, cookies, request }) => {
 			.input('targetUserOid', targetUserOid)
 			.query(
 				`SELECT COUNT(*) AS AnyAssignmentCount
-				 FROM dbo.ScheduleUserTypes sut
+				 FROM dbo.ScheduleAssignments sut
 				 WHERE sut.UserOid = @targetUserOid;`
 			);
 		const anyAssignmentCount = Number(
@@ -596,7 +723,7 @@ export const DELETE: RequestHandler = async ({ locals, cookies, request }) => {
 				.input('today', today)
 				.input('actorUserOid', ctx.userOid)
 				.query(
-					`UPDATE dbo.ScheduleUserTypes
+					`UPDATE dbo.ScheduleAssignments
 					 SET EndDate = CASE
 						 WHEN EndDate IS NULL OR EndDate > @today THEN @today
 						 ELSE EndDate
@@ -617,7 +744,7 @@ export const DELETE: RequestHandler = async ({ locals, cookies, request }) => {
 				.input('today', today)
 				.input('actorUserOid', ctx.userOid)
 				.query(
-					`UPDATE dbo.ScheduleUserTypes
+					`UPDATE dbo.ScheduleAssignments
 					 SET IsActive = 0,
 					 	 DeletedAt = SYSUTCDATETIME(),
 					 	 DeletedBy = @actorUserOid

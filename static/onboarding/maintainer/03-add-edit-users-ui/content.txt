@@ -1,0 +1,4 @@
+Add/Edit Users UI
+Use these screens to enable access to users and update existing user access.
+
+Removing a user that has been assigned to a shift will result in a confirmation popup.

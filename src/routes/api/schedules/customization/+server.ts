@@ -2,6 +2,7 @@ import { error, json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { GetPool } from '$lib/server/db';
 import { DEFAULT_SCHEDULE_THEME } from '$lib/server/schedule-theme';
+import sql from 'mssql';
 
 type ThemeFieldKey =
 	| 'background'
@@ -57,15 +58,20 @@ function parseScheduleName(value: unknown): string {
 	return trimmed;
 }
 
-function parseScheduleIsActive(value: unknown): boolean {
-	if (typeof value !== 'boolean') {
-		throw error(400, 'A valid isActive value is required');
-	}
-	return value;
-}
-
 function isHexColor(value: string): boolean {
 	return /^#[0-9a-f]{6}$/i.test(value);
+}
+
+function parseExpectedVersionEpochMs(value: unknown): number | null {
+	if (value === null || value === undefined || value === '') return null;
+	if (typeof value !== 'string') {
+		throw error(400, 'A valid expectedVersionAt value is required');
+	}
+	const parsed = new Date(value);
+	if (Number.isNaN(parsed.getTime())) {
+		throw error(400, 'A valid expectedVersionAt value is required');
+	}
+	return parsed.getTime();
 }
 
 function parseThemePayload(value: unknown): ScheduleThemePayload {
@@ -112,7 +118,7 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 	const body = await request.json().catch(() => null);
 	const scheduleId = parseScheduleId(body?.scheduleId);
 	const scheduleName = parseScheduleName(body?.scheduleName);
-	const isActive = parseScheduleIsActive(body?.isActive);
+	const expectedVersionEpochMs = parseExpectedVersionEpochMs(body?.expectedVersionAt);
 	const theme = parseThemePayload(body?.theme);
 	const themeJson = JSON.stringify(theme);
 
@@ -141,17 +147,20 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 		.request()
 		.input('scheduleId', scheduleId)
 		.input('scheduleName', scheduleName)
-		.input('isActive', isActive ? 1 : 0)
 		.input('themeJson', themeJson)
 		.input('updatedBy', user.id)
+		.input('expectedVersionEpochMs', sql.BigInt, expectedVersionEpochMs)
 		.query(
 			`UPDATE dbo.Schedules
 			 SET Name = @scheduleName,
-				 IsActive = @isActive,
 				 ThemeJson = @themeJson,
 				 UpdatedAt = SYSUTCDATETIME(),
 				 UpdatedBy = @updatedBy
 			 WHERE ScheduleId = @scheduleId
+			   AND (
+					@expectedVersionEpochMs IS NULL
+					OR DATEDIFF_BIG(MILLISECOND, '19700101', COALESCE(UpdatedAt, CreatedAt)) = @expectedVersionEpochMs
+			   )
 			   AND DeletedAt IS NULL;
 
 			 SELECT @@ROWCOUNT AS UpdatedRows;`
@@ -159,6 +168,43 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 
 	const updatedRows = Number(updateResult.recordset?.[0]?.UpdatedRows ?? 0);
 	if (updatedRows === 0) {
+		const currentRowResult = await pool
+			.request()
+			.input('scheduleId', scheduleId)
+			.query(
+				`SELECT TOP (1)
+					COALESCE(UpdatedAt, CreatedAt) AS VersionAt,
+					IsActive
+				 FROM dbo.Schedules
+				 WHERE ScheduleId = @scheduleId
+				   AND DeletedAt IS NULL;`
+			);
+		const currentRow = currentRowResult.recordset?.[0];
+		if (!currentRow) {
+			throw error(404, 'Schedule not found');
+		}
+		return json(
+			{
+				code: 'SCHEDULE_CONCURRENT_MODIFICATION',
+				message: 'This schedule changed while you were editing. Refresh and retry.'
+			},
+			{ status: 409 }
+		);
+	}
+
+	const versionResult = await pool
+		.request()
+		.input('scheduleId', scheduleId)
+		.query(
+			`SELECT TOP (1)
+				COALESCE(UpdatedAt, CreatedAt) AS VersionAt,
+				IsActive
+			 FROM dbo.Schedules
+			 WHERE ScheduleId = @scheduleId
+			   AND DeletedAt IS NULL;`
+		);
+	const updatedSchedule = versionResult.recordset?.[0];
+	if (!updatedSchedule) {
 		throw error(404, 'Schedule not found');
 	}
 
@@ -166,7 +212,8 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 		ok: true,
 		scheduleId,
 		scheduleName,
-		isActive,
-		theme
+		isActive: Boolean(updatedSchedule.IsActive),
+		theme,
+		versionAt: updatedSchedule.VersionAt
 	});
 };

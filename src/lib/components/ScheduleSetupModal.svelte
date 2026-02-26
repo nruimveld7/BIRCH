@@ -2,6 +2,7 @@
 	import { base } from '$app/paths';
 	import { goto } from '$app/navigation';
 	import { onDestroy, onMount, tick } from 'svelte';
+	import ConfirmDialog, { type ConfirmDialogOption } from '$lib/components/ConfirmDialog.svelte';
 	import ThemeToggle from '$lib/components/ThemeToggle.svelte';
 	import ColorPicker from '$lib/components/ColorPicker.svelte';
 	import { fetchWithAuthRedirect as fetchWithAuthRedirectUtil } from '$lib/utils/fetchWithAuthRedirect';
@@ -14,6 +15,7 @@
 		IsDefault: boolean;
 		IsActive: boolean;
 		ThemeJson?: string | null;
+		VersionAt?: string | null;
 	};
 	type ThemeMode = 'dark' | 'light';
 	type ThemeSection = 'page' | 'schedule';
@@ -37,18 +39,35 @@
 		scheduleName: string;
 		isActive: boolean;
 		themes: Record<ThemeMode, ThemeDraft>;
+		versionAt: string | null;
 	};
 	type ScheduleStateMutationResponse = {
 		ok?: boolean;
 		scheduleId?: number;
 		isActive?: boolean;
 		mode?: 'schedule_state_updated' | 'manager_removed' | 'schedule_deleted';
+		versionAt?: string | null;
 	};
 	type ScheduleStateConflictResponse = {
 		code?: string;
 		action?: 'REMOVE_SELF' | 'DELETE_SCHEDULE';
 		managerCount?: number;
 		message?: string;
+	};
+	type ScheduleCustomizationMutationResponse = {
+		ok?: boolean;
+		scheduleId?: number;
+		scheduleName?: string;
+		isActive?: boolean;
+		theme?: Record<ThemeMode, ThemeDraft>;
+		versionAt?: string | null;
+	};
+	type ConfirmDialogState = {
+		title: string;
+		message: string;
+		options: ConfirmDialogOption[];
+		cancelOptionId: string;
+		resolve: (optionId: string) => void;
 	};
 
 	export let open = false;
@@ -57,6 +76,10 @@
 	export let currentThemeMode: ThemeMode = 'dark';
 	export let onThemeModeChange: (nextMode: ThemeMode) => void | Promise<void> = () => {};
 	export let onClose: () => void = () => {};
+	export let onMembershipsRefresh: (
+		memberships: ScheduleMembership[],
+		activeScheduleId: number | null
+	) => void | Promise<void> = () => {};
 	let liveMemberships: ScheduleMembership[] = [];
 	let membershipsLoading = false;
 	let membershipsError = '';
@@ -92,6 +115,7 @@
 	let selectedThemeMode: ThemeMode = 'dark';
 	let selectedThemeSection: ThemeSection = 'page';
 	let modalScrollEl: HTMLDivElement | null = null;
+	let modalEl: HTMLDivElement | null = null;
 	let railEl: HTMLDivElement | null = null;
 	let showCustomScrollbar = false;
 	let thumbHeightPx = 0;
@@ -100,6 +124,7 @@
 	let dragStartY = 0;
 	let dragStartThumbTopPx = 0;
 	let modalScrollSyncKey = '';
+	let confirmDialog: ConfirmDialogState | null = null;
 
 	const themeFieldOptions: ThemeFieldOption[] = [
 		{ key: 'background', label: 'Background', section: 'page' },
@@ -110,14 +135,23 @@
 		{ key: 'primaryGradient2', label: 'Primary Gradient 2', section: 'page' },
 		{ key: 'secondaryGradient1', label: 'Secondary Gradient 1', section: 'page' },
 		{ key: 'secondaryGradient2', label: 'Secondary Gradient 2', section: 'page' },
-		{ key: 'todayColor', label: 'Today Color', section: 'schedule' },
-		{ key: 'weekendColor', label: 'Weekend Color', section: 'schedule' },
 		{ key: 'weekdayColor', label: 'Weekday Color', section: 'schedule' },
+		{ key: 'weekendColor', label: 'Weekend Color', section: 'schedule' },
+		{ key: 'todayColor', label: 'Today Color', section: 'schedule' },
 		{ key: 'scheduleBorderColor', label: 'Border Color', section: 'schedule' }
 	];
 	$: activeThemeFieldOptions = themeFieldOptions.filter(
 		(themeField) => themeField.section === selectedThemeSection
 	);
+	$: activeThemeFieldRows = activeThemeFieldOptions.reduce<ThemeFieldOption[][]>((rows, themeField) => {
+		const lastRow = rows[rows.length - 1];
+		if (!lastRow || lastRow.length === 2) {
+			rows.push([themeField]);
+		} else {
+			lastRow.push(themeField);
+		}
+		return rows;
+	}, []);
 
 	const themeDefaults: Record<ThemeMode, ThemeDraft> = {
 		dark: {
@@ -308,6 +342,7 @@
 		return {
 			scheduleName: state.scheduleName,
 			isActive: state.isActive,
+			versionAt: state.versionAt,
 			themes: {
 				dark: { ...state.themes.dark },
 				light: { ...state.themes.light }
@@ -462,20 +497,24 @@
 			}
 			const activeMembership =
 				effectiveMemberships.find((membership) => membership.ScheduleId === activeId) ?? null;
-			if (activeMembership) {
-				const parsedThemes = parseThemeJsonText(activeMembership.ThemeJson);
-				if (parsedThemes) {
-					applyThemeState({
-						scheduleName: activeMembership.Name,
-						isActive: activeMembership.IsActive,
-						themes: {
-							dark: { ...parsedThemes.dark },
-							light: { ...parsedThemes.light }
-						}
-					});
-					return;
+				if (activeMembership) {
+					const parsedThemes = parseThemeJsonText(activeMembership.ThemeJson);
+					if (parsedThemes) {
+						applyThemeState({
+							scheduleName: activeMembership.Name,
+							isActive: activeMembership.IsActive,
+							versionAt:
+								typeof activeMembership.VersionAt === 'string'
+									? activeMembership.VersionAt
+									: null,
+							themes: {
+								dark: { ...parsedThemes.dark },
+								light: { ...parsedThemes.light }
+							}
+						});
+						return;
+					}
 				}
-			}
 		}
 		clearThemeOverrides();
 	}
@@ -532,6 +571,7 @@
 		const seed: ManagerCustomizationState = {
 			scheduleName: membership.Name,
 			isActive: membership.IsActive,
+			versionAt: typeof membership.VersionAt === 'string' ? membership.VersionAt : null,
 			themes: {
 				dark: parsedThemes ? { ...parsedThemes.dark } : { ...themeDefaults.dark },
 				light: parsedThemes ? { ...parsedThemes.light } : { ...themeDefaults.light }
@@ -596,14 +636,14 @@
 	async function postManagerCustomizationUpdate(
 		scheduleId: number,
 		nextState: ManagerCustomizationState
-	): Promise<void> {
+	): Promise<ScheduleCustomizationMutationResponse> {
 		const response = await fetchWithAuthRedirect(`${base}/api/schedules/customization`, {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json', accept: 'application/json' },
 			body: JSON.stringify({
 				scheduleId,
 				scheduleName: nextState.scheduleName,
-				isActive: nextState.isActive,
+				expectedVersionAt: nextState.versionAt,
 				theme: nextState.themes
 			})
 		});
@@ -611,12 +651,25 @@
 			throw new Error('Session expired or access changed. Sign in again and retry.');
 		}
 		if (!response.ok) {
+			if (response.status === 409) {
+				const payload = (await response.json().catch(() => null)) as
+					| { code?: string; message?: string }
+					| null;
+				if (payload?.code === 'SCHEDULE_CONCURRENT_MODIFICATION') {
+					await refreshMemberships();
+					throw new Error(
+						payload.message?.trim() ||
+							'This schedule changed while you were editing. Review the latest values and retry.'
+					);
+				}
+			}
 			const message = await parseErrorMessage(
 				response,
 				`Failed to save customization (${response.status})`
 			);
 			throw new Error(message);
 		}
+		return (await response.json()) as ScheduleCustomizationMutationResponse;
 	}
 
 	async function parseErrorMessage(response: Response, fallback: string): Promise<string> {
@@ -664,6 +717,7 @@
 					body: JSON.stringify({
 						scheduleId,
 						isActive: nextIsActive,
+						expectedVersionAt: selectedManagerSaved?.versionAt ?? null,
 						confirmDeactivation
 					})
 				});
@@ -671,7 +725,7 @@
 			let response = await sendStateChange(false);
 			if (!response) return;
 
-			if (!response.ok && !nextIsActive && response.status === 409) {
+			if (!response.ok && response.status === 409) {
 				let conflict: ScheduleStateConflictResponse | null = null;
 				try {
 					conflict = (await response.json()) as ScheduleStateConflictResponse;
@@ -679,14 +733,31 @@
 					conflict = null;
 				}
 
-				if (conflict?.code === 'SCHEDULE_DEACTIVATION_CONFIRMATION_REQUIRED') {
+				if (conflict?.code === 'SCHEDULE_CONCURRENT_MODIFICATION') {
+					await refreshMemberships();
+					throw new Error(
+						conflict.message?.trim() ||
+							'This schedule changed while you were editing. Review the latest values and retry.'
+					);
+				}
+
+				if (!nextIsActive && conflict?.code === 'SCHEDULE_DEACTIVATION_CONFIRMATION_REQUIRED') {
 					const promptMessage =
 						typeof conflict.message === 'string' && conflict.message.trim()
 							? conflict.message
 							: conflict.action === 'DELETE_SCHEDULE'
 								? 'You are the last Manager for this schedule. If you continue, the schedule and all related data will be permanently deleted. Continue?'
 								: 'This user is currently assigned to active shifts. If you continue, active assignments will end effective today and future assignments will be removed. Continue?';
-					if (!window.confirm(promptMessage)) {
+					const confirmChoice = await openConfirmDialog({
+						title: 'Confirm Deactivation',
+						message: promptMessage,
+						options: [
+							{ id: 'cancel', label: 'Cancel' },
+							{ id: 'continue', label: 'Continue', tone: 'danger' }
+						],
+						cancelOptionId: 'cancel'
+					});
+					if (confirmChoice !== 'continue') {
 						return;
 					}
 					response = await sendStateChange(true);
@@ -712,7 +783,11 @@
 
 			updateManagerDraft(scheduleId, {
 				...selectedManagerDraft,
-				isActive: nextIsActive
+				isActive: nextIsActive,
+				versionAt:
+					typeof payload.versionAt === 'string' && payload.versionAt.trim()
+						? payload.versionAt
+						: selectedManagerDraft.versionAt
 			});
 			const savedState = managerSavedByScheduleId[scheduleId];
 			if (savedState) {
@@ -720,7 +795,11 @@
 					...managerSavedByScheduleId,
 					[scheduleId]: {
 						...savedState,
-						isActive: nextIsActive
+						isActive: nextIsActive,
+						versionAt:
+							typeof payload.versionAt === 'string' && payload.versionAt.trim()
+								? payload.versionAt
+								: savedState.versionAt
 					}
 				};
 			}
@@ -808,18 +887,26 @@
 		managerDraftStatusMessage = '';
 
 		try {
-			await postManagerCustomizationUpdate(scheduleId, nextSaved);
+			const payload = await postManagerCustomizationUpdate(scheduleId, nextSaved);
+			const nextVersionAt =
+				typeof payload.versionAt === 'string' && payload.versionAt.trim()
+					? payload.versionAt
+					: nextSaved.versionAt;
+			const persistedState: ManagerCustomizationState = {
+				...nextSaved,
+				versionAt: nextVersionAt
+			};
 			managerSavedByScheduleId = {
 				...managerSavedByScheduleId,
-				[scheduleId]: cloneManagerState(nextSaved)
+				[scheduleId]: cloneManagerState(persistedState)
 			};
 			managerDraftByScheduleId = {
 				...managerDraftByScheduleId,
-				[scheduleId]: cloneManagerState(nextSaved)
+				[scheduleId]: cloneManagerState(persistedState)
 			};
 			await refreshMemberships();
 			if (isSelectedMembershipActive) {
-				applyThemeState(nextSaved);
+				applyThemeState(persistedState);
 			}
 			managerDraftStatusTone = 'success';
 			managerDraftStatusMessage = 'Changes saved.';
@@ -836,15 +923,55 @@
 		onClose();
 	}
 
-	function handleBackdropMouseDown(event: MouseEvent) {
-		if (event.target === event.currentTarget) {
-			closeModal();
+	function closeConfirmDialog(optionId: string) {
+		const resolver = confirmDialog?.resolve;
+		confirmDialog = null;
+		if (resolver) resolver(optionId);
+	}
+
+	async function openConfirmDialog(config: {
+		title: string;
+		message: string;
+		options: ConfirmDialogOption[];
+		cancelOptionId: string;
+	}): Promise<string> {
+		if (confirmDialog) {
+			closeConfirmDialog(confirmDialog.cancelOptionId);
 		}
+		return new Promise<string>((resolve) => {
+			confirmDialog = {
+				title: config.title,
+				message: config.message,
+				options: config.options,
+				cancelOptionId: config.cancelOptionId,
+				resolve
+			};
+		});
+	}
+
+	function handleBackdropMouseDown(event: MouseEvent) {
+		if (confirmDialog) return;
+		if (event.target !== event.currentTarget) return;
+		if (hasOpenNestedPopover()) return;
+		closeModal();
+	}
+
+	function hasOpenNestedPopover(): boolean {
+		return Boolean(
+			modalEl?.querySelector('.colorPickerPopover, .datePickerMenu.open, .pickerMenu.open')
+		);
 	}
 
 	function handleWindowKeydown(event: KeyboardEvent) {
 		if (!open) return;
-		if (event.key === 'Escape') closeModal();
+		if (event.key === 'Escape') {
+			if (confirmDialog) {
+				event.preventDefault();
+				closeConfirmDialog(confirmDialog.cancelOptionId);
+				return;
+			}
+			closeModal();
+		}
 	}
 
 	function scheduleRoleSuffix(role: ScheduleRole): string {
@@ -1043,7 +1170,8 @@
 						...membership,
 						ScheduleId: Number(membership.ScheduleId),
 						IsActive: Boolean(membership.IsActive),
-						ThemeJson: typeof membership.ThemeJson === 'string' ? membership.ThemeJson : null
+						ThemeJson: typeof membership.ThemeJson === 'string' ? membership.ThemeJson : null,
+						VersionAt: typeof membership.VersionAt === 'string' ? membership.VersionAt : null
 					}))
 				: [];
 			currentScheduleId = normalizeScheduleId(data.activeScheduleId) ?? currentScheduleId;
@@ -1053,6 +1181,7 @@
 					(liveMemberships.length > 0 ? liveMemberships[0].ScheduleId : selectedScheduleId);
 				syncSelectionToCurrentOnRefresh = false;
 			}
+			await onMembershipsRefresh(liveMemberships, currentScheduleId);
 			hasLiveMemberships = true;
 		} catch (errorValue) {
 			membershipsError =
@@ -1172,23 +1301,33 @@
 	) {
 		const scheduleId = selectedMembership.ScheduleId;
 		const nextIsActive = selectedMembership.IsActive;
+		const nextVersionAt =
+			typeof selectedMembership.VersionAt === 'string' ? selectedMembership.VersionAt : null;
 		const savedState = managerSavedByScheduleId[scheduleId];
-		if (savedState && savedState.isActive !== nextIsActive) {
+		if (
+			savedState &&
+			(savedState.isActive !== nextIsActive || savedState.versionAt !== nextVersionAt)
+		) {
 			managerSavedByScheduleId = {
 				...managerSavedByScheduleId,
 				[scheduleId]: {
 					...savedState,
-					isActive: nextIsActive
+					isActive: nextIsActive,
+					versionAt: nextVersionAt
 				}
 			};
 		}
 		const draftState = managerDraftByScheduleId[scheduleId];
-		if (draftState && draftState.isActive !== nextIsActive) {
+		if (
+			draftState &&
+			(draftState.isActive !== nextIsActive || draftState.versionAt !== nextVersionAt)
+		) {
 			managerDraftByScheduleId = {
 				...managerDraftByScheduleId,
 				[scheduleId]: {
 					...draftState,
-					isActive: nextIsActive
+					isActive: nextIsActive,
+					versionAt: nextVersionAt
 				}
 			};
 		}
@@ -1235,7 +1374,7 @@
 		hasLiveMemberships = false;
 		liveMemberships = [];
 		currentScheduleId = normalizeScheduleId(activeScheduleId);
-		selectedScheduleId = null;
+		selectedScheduleId = normalizeScheduleId(activeScheduleId);
 		selectedThemeMode = currentThemeMode;
 		selectedThemeSection = 'page';
 		managerThemesExpanded = false;
@@ -1265,7 +1404,7 @@
 		}
 	}
 
-	$: if (open && !selectedScheduleId && effectiveMemberships.length > 0) {
+	$: if (open && !showCreateScheduleForm && !selectedScheduleId && effectiveMemberships.length > 0) {
 		selectedScheduleId = resolvedCurrentScheduleId ?? effectiveMemberships[0].ScheduleId;
 	}
 
@@ -1309,6 +1448,9 @@
 	}
 
 	onDestroy(() => {
+		if (confirmDialog) {
+			closeConfirmDialog(confirmDialog.cancelOptionId);
+		}
 		stopDragging();
 		if (typeof document !== 'undefined') {
 			document.body.classList.remove('team-modal-open');
@@ -1338,6 +1480,7 @@
 			role="dialog"
 			aria-modal="true"
 			aria-labelledby="schedule-setup-title"
+			bind:this={modalEl}
 		>
 			<div class="teamSetupModalScroll" bind:this={modalScrollEl} on:scroll={onModalScroll}>
 				<header class="teamSetupHeader">
@@ -1549,28 +1692,53 @@
 																		<tr>
 																			<th scope="col">Setting</th>
 																			<th scope="col">Color</th>
+																			<th scope="col">Setting</th>
+																			<th scope="col">Color</th>
 																		</tr>
 																	</thead>
 																	<tbody>
-																		{#each activeThemeFieldOptions as themeField (themeField.key)}
+																		{#each activeThemeFieldRows as themeRow}
 																			<tr>
-																				<th scope="row">{themeField.label}</th>
-																				<td>
+																				<th scope="row">{themeRow[0].label}</th>
+																				<td class="managerThemeColorCell">
 																					<div class="managerThemeField">
 																						<ColorPicker
-																							id={`manager-theme-${themeField.key}`}
-																							label={themeField.label}
+																							id={`manager-theme-${themeRow[0].key}`}
+																							label={themeRow[0].label}
 																							value={selectedManagerDraft.themes[selectedThemeMode][
-																								themeField.key
+																								themeRow[0].key
 																							]}
 																							on:change={(event) =>
 																								handleManagerThemeInput(
-																									themeField.key,
+																									themeRow[0].key,
 																									event.detail
 																								)}
 																						/>
 																					</div>
 																				</td>
+																				{#if themeRow[1]}
+																					<th scope="row" class="managerThemeSettingDivider">
+																						{themeRow[1].label}
+																					</th>
+																					<td class="managerThemeColorCell">
+																						<div class="managerThemeField">
+																							<ColorPicker
+																								id={`manager-theme-${themeRow[1].key}`}
+																								label={themeRow[1].label}
+																								value={selectedManagerDraft.themes[selectedThemeMode][
+																									themeRow[1].key
+																								]}
+																								on:change={(event) =>
+																									handleManagerThemeInput(
+																										themeRow[1].key,
+																										event.detail
+																									)}
+																							/>
+																						</div>
+																					</td>
+																				{:else}
+																					<td colspan="2"></td>
+																				{/if}
 																			</tr>
 																		{/each}
 																	</tbody>
@@ -1642,5 +1810,13 @@
 				</div>
 			{/if}
 		</div>
+		<ConfirmDialog
+			open={Boolean(confirmDialog)}
+			title={confirmDialog?.title ?? ''}
+			message={confirmDialog?.message ?? ''}
+			options={confirmDialog?.options ?? []}
+			cancelOptionId={confirmDialog?.cancelOptionId ?? 'cancel'}
+			on:select={(event) => closeConfirmDialog(event.detail)}
+		/>
 	</div>
 {/if}

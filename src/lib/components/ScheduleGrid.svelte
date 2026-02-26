@@ -51,6 +51,7 @@
 		startDate: string;
 		endDate: string;
 		comments: string;
+		versionStamp?: string;
 		notifyImmediately?: boolean;
 		scheduledReminders?: Array<{
 			amount: number;
@@ -63,7 +64,7 @@
 		day: MonthDay;
 		scopeType: EventScopeType;
 		scopeLabel: string | null;
-		scopeEmployeeTypeId: number | null;
+		scopeShiftId: number | null;
 		scopeUserOid: string | null;
 	};
 	type PickerOption = { value: number | string; label: string; color?: string };
@@ -81,6 +82,7 @@
 	export let onScheduleRefresh: () => void | Promise<void> = () => {};
 	export let selectedYear = new Date().getFullYear();
 	export let selectedMonthIndex = new Date().getMonth();
+	export let popupResetToken = 0;
 
 	let gridEl: HTMLDivElement | null = null;
 	let bandEl: HTMLDivElement | null = null;
@@ -115,11 +117,13 @@
 	let memberEventsPopupTitle = '';
 	let memberEventsPopupDayIso = '';
 	let memberEventsPopupScopeType: EventScopeType = 'global';
-	let memberEventsPopupScopeEmployeeTypeId: number | null = null;
+	let memberEventsPopupScopeShiftId: number | null = null;
 	let memberEventsPopupScopeUserOid: string | null = null;
 	let memberEventsPopupMode: PopupMode = 'list';
 	let editingEventId: number | null = null;
+	let editingEventVersionStamp = '';
 	let memberEventsModalScrollEl: HTMLDivElement | null = null;
+	let memberEventsModalEl: HTMLDivElement | null = null;
 	let memberEventsRailEl: HTMLDivElement | null = null;
 	let showMemberEventsModalScrollbar = false;
 	let memberEventsThumbHeightPx = 0;
@@ -167,6 +171,8 @@
 	let hoverTooltipScope: HoverCellScope | null = null;
 	let hoverTooltipEl: HTMLDivElement | null = null;
 	let hoverTooltipFetchToken = 0;
+	let memberEventsPopupPollTimer: ReturnType<typeof setInterval> | null = null;
+	let lastPopupResetToken = popupResetToken;
 	const scopedEventsCache = new Map<string, ScopedEventEntry[]>();
 	const DOUBLE_TAP_WINDOW_MS = 320;
 	let lastHeaderTouchTapDay: number | null = null;
@@ -212,13 +218,13 @@
 	})();
 	$: gridStyle = `--schedule-row-effective-height:${effectiveUserRowHeightPx}px; grid-template-columns: ${showTeamColumnRailToggle ? 'var(--team-col-width) var(--team-toggle-col-width)' : 'var(--team-col-width)'} repeat(${dim}, minmax(34px, 1fr)); grid-template-rows: ${gridTemplateRows}; min-width: ${Math.max(minimumGridWidthFromContent, minimumGridWidthFloor)}px;`;
 	$: activeTodayDay = monthDays.find((item) => item.isToday)?.day ?? null;
-	$: shiftNameByEmployeeTypeId = (() => {
+	$: shiftNameByShiftId = (() => {
 		const shiftNames = new Map<number, string>();
 		for (const group of groups) {
-			const nextEmployeeTypeId = group.employeeTypeId;
-			if (nextEmployeeTypeId === null || nextEmployeeTypeId === undefined) continue;
-			if (!shiftNames.has(nextEmployeeTypeId)) {
-				shiftNames.set(nextEmployeeTypeId, group.category);
+			const nextShiftId = group.employeeTypeId;
+			if (nextShiftId === null || nextShiftId === undefined) continue;
+			if (!shiftNames.has(nextShiftId)) {
+				shiftNames.set(nextShiftId, group.category);
 			}
 		}
 		return shiftNames;
@@ -321,7 +327,7 @@
 		day: MonthDay,
 		scopeType: EventScopeType,
 		scopeLabel: string | null = null,
-		scopeEmployeeTypeId: number | null = null,
+		scopeShiftId: number | null = null,
 		scopeUserOid: string | null = null
 	) {
 		const dateLabel = formatPopupDate(day);
@@ -329,7 +335,7 @@
 		memberEventsPopupTitle = `${dateLabel} Events${normalizedScopeLabel ? ` - ${normalizedScopeLabel}` : ''}`;
 		memberEventsPopupDayIso = toIsoDate(selectedYear, selectedMonthIndex, day.day);
 		memberEventsPopupScopeType = scopeType;
-		memberEventsPopupScopeEmployeeTypeId = scopeEmployeeTypeId;
+		memberEventsPopupScopeShiftId = scopeShiftId;
 		memberEventsPopupScopeUserOid = scopeUserOid;
 		memberEventsPopupMode = 'list';
 		memberEventsError = '';
@@ -347,6 +353,7 @@
 		memberEventsLoading = false;
 		memberEventsError = '';
 		editingEventId = null;
+		editingEventVersionStamp = '';
 		showMemberEventsModalScrollbar = false;
 		memberEventsThumbHeightPx = 0;
 		memberEventsThumbTopPx = 0;
@@ -355,10 +362,10 @@
 	function eventsCacheKey(
 		dayIso: string,
 		scopeType: EventScopeType,
-		scopeEmployeeTypeId: number | null,
+		scopeShiftId: number | null,
 		scopeUserOid: string | null
 	) {
-		return `${dayIso}|${scopeType}|${scopeEmployeeTypeId ?? ''}|${scopeUserOid ?? ''}`;
+		return `${dayIso}|${scopeType}|${scopeShiftId ?? ''}|${scopeUserOid ?? ''}`;
 	}
 
 	function eventListTitle(day: MonthDay, scopeLabel: string | null = null): string {
@@ -393,7 +400,7 @@
 		if (eventRow.scopeType === 'global') return 'Everyone';
 		if (eventRow.scopeType === 'shift') {
 			if (eventRow.employeeTypeId === null) return 'Shift';
-			return shiftNameByEmployeeTypeId.get(eventRow.employeeTypeId) ?? 'Shift';
+			return shiftNameByShiftId.get(eventRow.employeeTypeId) ?? 'Shift';
 		}
 		return null;
 	}
@@ -401,15 +408,15 @@
 	async function fetchScopedEvents(
 		dayIso: string,
 		scopeType: EventScopeType,
-		scopeEmployeeTypeId: number | null,
+		scopeShiftId: number | null,
 		scopeUserOid: string | null
 	): Promise<ScopedEventEntry[]> {
 		const queryParts = [
 			`day=${encodeURIComponent(dayIso)}`,
 			`scope=${encodeURIComponent(scopeType)}`
 		];
-		if (scopeEmployeeTypeId) {
-			queryParts.push(`employeeTypeId=${encodeURIComponent(String(scopeEmployeeTypeId))}`);
+		if (scopeShiftId) {
+			queryParts.push(`employeeTypeId=${encodeURIComponent(String(scopeShiftId))}`);
 		}
 		if (scopeType === 'user' && scopeUserOid) {
 			queryParts.push(`userOid=${encodeURIComponent(scopeUserOid)}`);
@@ -435,7 +442,7 @@
 
 	async function loadScopedEvents() {
 		if (!memberEventsPopupDayIso) return;
-		if (memberEventsPopupScopeType === 'shift' && !memberEventsPopupScopeEmployeeTypeId) {
+		if (memberEventsPopupScopeType === 'shift' && !memberEventsPopupScopeShiftId) {
 			memberEventsError = 'This shift cannot be resolved for event lookups.';
 			scopedEventEntries = [];
 			return;
@@ -452,7 +459,7 @@
 			scopedEventEntries = await fetchScopedEvents(
 				memberEventsPopupDayIso,
 				memberEventsPopupScopeType,
-				memberEventsPopupScopeEmployeeTypeId,
+				memberEventsPopupScopeShiftId,
 				memberEventsPopupScopeUserOid
 			);
 		} catch (error) {
@@ -480,7 +487,7 @@
 		return (
 			left.day.day === right.day.day &&
 			left.scopeType === right.scopeType &&
-			left.scopeEmployeeTypeId === right.scopeEmployeeTypeId &&
+			left.scopeShiftId === right.scopeShiftId &&
 			left.scopeUserOid === right.scopeUserOid &&
 			left.scopeLabel === right.scopeLabel
 		);
@@ -542,7 +549,7 @@
 		const cacheKey = eventsCacheKey(
 			dayIso,
 			scope.scopeType,
-			scope.scopeEmployeeTypeId,
+			scope.scopeShiftId,
 			scope.scopeUserOid
 		);
 		const cachedEntries = scopedEventsCache.get(cacheKey);
@@ -563,7 +570,7 @@
 			const nextEntries = await fetchScopedEvents(
 				dayIso,
 				scope.scopeType,
-				scope.scopeEmployeeTypeId,
+				scope.scopeShiftId,
 				scope.scopeUserOid
 			);
 			scopedEventsCache.set(cacheKey, nextEntries);
@@ -659,6 +666,7 @@
 		scheduledReminderDrafts = [createDefaultScheduledReminderDraft()];
 		addEventError = '';
 		editingEventId = null;
+		editingEventVersionStamp = '';
 		eventCodePickerOpen = false;
 		customDisplayModePickerOpen = false;
 		addStartDatePickerOpen = false;
@@ -765,6 +773,7 @@
 		memberEventsPopupMode = 'edit';
 		addEventError = '';
 		editingEventId = eventRow.eventId;
+		editingEventVersionStamp = eventRow.versionStamp ?? '';
 		addEventComments = eventRow.comments;
 		addEventStartDate = eventRow.startDate;
 		addEventEndDate = eventRow.endDate;
@@ -831,7 +840,7 @@
 		if (eventSaveInProgress) return;
 		addEventError = '';
 
-		if (memberEventsPopupScopeType === 'shift' && !memberEventsPopupScopeEmployeeTypeId) {
+		if (memberEventsPopupScopeType === 'shift' && !memberEventsPopupScopeShiftId) {
 			addEventError = 'This shift cannot be resolved for event updates.';
 			return;
 		}
@@ -893,7 +902,7 @@
 
 		const payload: Record<string, unknown> = {
 			scope: memberEventsPopupScopeType,
-			employeeTypeId: memberEventsPopupScopeEmployeeTypeId,
+			employeeTypeId: memberEventsPopupScopeShiftId,
 			userOid: memberEventsPopupScopeUserOid,
 			startDate: addEventStartDate,
 			endDate: addEventEndDate,
@@ -919,7 +928,13 @@
 
 		const isEditing = memberEventsPopupMode === 'edit' && editingEventId !== null;
 		if (isEditing) {
+			const expectedVersionStamp = editingEventVersionStamp.trim();
+			if (!expectedVersionStamp) {
+				addEventError = 'This event can no longer be edited. Refresh and try again.';
+				return;
+			}
 			payload.eventId = editingEventId;
+			payload.expectedVersionStamp = expectedVersionStamp;
 		}
 
 		eventSaveInProgress = true;
@@ -957,6 +972,11 @@
 
 	async function removeEvent() {
 		if (eventSaveInProgress || editingEventId === null) return;
+		const expectedVersionStamp = editingEventVersionStamp.trim();
+		if (!expectedVersionStamp) {
+			addEventError = 'This event can no longer be removed. Refresh and try again.';
+			return;
+		}
 		addEventError = '';
 		eventSaveInProgress = true;
 		try {
@@ -968,7 +988,10 @@
 						'content-type': 'application/json',
 						accept: 'application/json'
 					},
-					body: JSON.stringify({ eventId: editingEventId })
+					body: JSON.stringify({
+						eventId: editingEventId,
+						expectedVersionStamp
+					})
 				},
 				base
 			);
@@ -1024,14 +1047,14 @@
 
 	function handleEmployeeDayDoubleClick(
 		employee: Employee,
-		groupEmployeeTypeId: number | null,
+		groupShiftId: number | null,
 		day: MonthDay
 	) {
 		void openMemberEventsPopup(
 			day,
 			'user',
 			employee.name,
-			groupEmployeeTypeId,
+			groupShiftId,
 			employee.userOid ?? null
 		);
 	}
@@ -1047,7 +1070,7 @@
 				day,
 				scopeType: 'global',
 				scopeLabel: null,
-				scopeEmployeeTypeId: null,
+				scopeShiftId: null,
 				scopeUserOid: null
 			},
 			pointer
@@ -1064,7 +1087,7 @@
 				day,
 				scopeType: 'shift',
 				scopeLabel: group.category,
-				scopeEmployeeTypeId: group.employeeTypeId ?? null,
+				scopeShiftId: group.employeeTypeId ?? null,
 				scopeUserOid: null
 			},
 			pointer
@@ -1073,7 +1096,7 @@
 
 	function handleEmployeeDayHover(
 		employee: Employee,
-		groupEmployeeTypeId: number | null,
+		groupShiftId: number | null,
 		day: MonthDay,
 		pointer: { clientX: number; clientY: number }
 	) {
@@ -1082,7 +1105,7 @@
 				day,
 				scopeType: 'user',
 				scopeLabel: employee.name,
-				scopeEmployeeTypeId: groupEmployeeTypeId,
+				scopeShiftId: groupShiftId,
 				scopeUserOid: employee.userOid ?? null
 			},
 			pointer
@@ -1103,6 +1126,24 @@
 
 	function setAddEndDatePickerOpen(next: boolean) {
 		addEndDatePickerOpen = next;
+	}
+
+	function hasOpenMemberEventsPopover(): boolean {
+		if (
+			eventCodePickerOpen ||
+			customDisplayModePickerOpen ||
+			addStartDatePickerOpen ||
+			addEndDatePickerOpen
+		) {
+			return true;
+		}
+		return Boolean(memberEventsModalEl?.querySelector('.colorPickerPopover'));
+	}
+
+	function handleMemberEventsBackdropMouseDown(event: MouseEvent) {
+		if (event.target !== event.currentTarget) return;
+		if (hasOpenMemberEventsPopover()) return;
+		closeMemberEventsPopup();
 	}
 
 	function refreshBandMeasurements(
@@ -1704,6 +1745,33 @@
 		scopedEventsCache.clear();
 	}
 
+	$: if (
+		memberEventsPopupOpen &&
+		memberEventsPopupMode === 'list' &&
+		memberEventsPopupPollTimer === null
+	) {
+		memberEventsPopupPollTimer = setInterval(() => {
+			if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
+			void loadScopedEvents();
+		}, 15000);
+	}
+
+	$: if (
+		(!memberEventsPopupOpen || memberEventsPopupMode !== 'list') &&
+		memberEventsPopupPollTimer !== null
+	) {
+		clearInterval(memberEventsPopupPollTimer);
+		memberEventsPopupPollTimer = null;
+	}
+
+	$: {
+		if (popupResetToken !== lastPopupResetToken) {
+			lastPopupResetToken = popupResetToken;
+			closeMemberEventsPopup();
+			hideHoverEventsTooltip();
+		}
+	}
+
 	$: {
 		const nextSelectionContextKey = `${selectedYear}-${selectedMonthIndex}`;
 		if (nextSelectionContextKey !== lastSelectionContextKey) {
@@ -1714,6 +1782,10 @@
 	}
 
 	onDestroy(() => {
+		if (memberEventsPopupPollTimer !== null) {
+			clearInterval(memberEventsPopupPollTimer);
+			memberEventsPopupPollTimer = null;
+		}
 		stopHorizontalDragging();
 		stopVerticalDragging();
 		stopMemberEventsModalDragging();
@@ -1947,17 +2019,14 @@
 		<div
 			class="displayNameModalBackdrop"
 			role="presentation"
-			on:mousedown={(event) => {
-				if (event.target === event.currentTarget) {
-					closeMemberEventsPopup();
-				}
-			}}
+			on:mousedown={handleMemberEventsBackdropMouseDown}
 		>
 			<div
 				class="displayNameModal memberEventsModal"
 				role="dialog"
 				aria-modal="true"
 				aria-labelledby="member-events-modal-title"
+				bind:this={memberEventsModalEl}
 			>
 				<div
 					class="memberEventsModalScroll"
@@ -2396,7 +2465,7 @@
 									disabled={eventSaveInProgress}
 								>
 									<svg viewBox="0 0 24 24" aria-hidden="true">
-										<path d="M4 7h16M9 7V5h6v2M9 10v8M15 10v8M7 7l1 13h8l1-13" />
+										<path d="M 2 4 h 20 M 6 4 V 1 h 12 v 3 M 2 6 h 20 M 4 6 l 1 15 h 13 L 20 6 M 9.5 8.5 v 10 M 14.5 8.5 v 10" />
 									</svg>
 									Remove
 								</button>

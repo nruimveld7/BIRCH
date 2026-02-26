@@ -1,0 +1,6 @@
+Selecting Schedule Month
+Use the month and year controls to move through the schedule timeline.
+
+You can jump to any month and year, or use the Today button to return to the current month.
+
+This helps you quickly check upcoming or past schedule assignments.

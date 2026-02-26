@@ -2,13 +2,7 @@ import type { Cookies, RequestEvent } from '@sveltejs/kit';
 import { error } from '@sveltejs/kit';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
-import {
-	SignJWT,
-	base64url,
-	createRemoteJWKSet,
-	importPKCS8,
-	jwtVerify
-} from 'jose';
+import { SignJWT, base64url, createRemoteJWKSet, importPKCS8, jwtVerify } from 'jose';
 import { env } from '$env/dynamic/private';
 import { GetPool } from '$lib/server/db';
 
@@ -17,6 +11,8 @@ export type Session = {
 		id: string;
 		email?: string;
 		name?: string;
+		givenName?: string;
+		surname?: string;
 	};
 };
 
@@ -27,12 +23,21 @@ type OidcDiscovery = {
 	jwks_uri: string;
 };
 
+type PendingAuthAttempt = {
+	state: string;
+	nonce: string;
+	codeVerifier: string;
+	createdAtMs: number;
+};
+
 const AUTH_STATE_COOKIE = 'oidc_state';
 const AUTH_NONCE_COOKIE = 'oidc_nonce';
 const AUTH_VERIFIER_COOKIE = 'oidc_verifier';
+const AUTH_PENDING_COOKIE = 'oidc_pending_auth';
 const SESSION_COOKIE = 'app_session';
 
 const AUTH_STATE_MAX_AGE_SEC = 5 * 60;
+const AUTH_PENDING_MAX_ENTRIES = 5;
 const SESSION_MAX_AGE_SEC = 8 * 60 * 60;
 const COOKIE_SECURE = env.NODE_ENV === 'production';
 const SESSION_CLEANUP_INTERVAL_MS = 15 * 60 * 1000;
@@ -116,34 +121,102 @@ export async function getAuthorizeUrl(_url: URL) {
 	};
 }
 
-export function setAuthState(
-	cookies: RequestEvent['cookies'],
-	data: { state: string; nonce: string; codeVerifier: string }
-) {
-	const cookieOpts = {
+function authCookieOptions(maxAge: number) {
+	return {
 		httpOnly: true,
 		secure: COOKIE_SECURE,
 		sameSite: 'lax' as const,
 		path: '/',
-		maxAge: AUTH_STATE_MAX_AGE_SEC
+		maxAge
 	};
+}
+
+function parsePendingAuthAttempts(raw: string | undefined): PendingAuthAttempt[] {
+	if (!raw) return [];
+	try {
+		const parsed = JSON.parse(raw);
+		if (!Array.isArray(parsed)) return [];
+		const cutoff = Date.now() - AUTH_STATE_MAX_AGE_SEC * 1000;
+		return parsed
+			.filter((entry): entry is PendingAuthAttempt => {
+				if (!entry || typeof entry !== 'object') return false;
+				return (
+					typeof entry.state === 'string' &&
+					typeof entry.nonce === 'string' &&
+					typeof entry.codeVerifier === 'string' &&
+					typeof entry.createdAtMs === 'number' &&
+					entry.createdAtMs >= cutoff
+				);
+			})
+			.slice(-AUTH_PENDING_MAX_ENTRIES);
+	} catch {
+		return [];
+	}
+}
+
+function writePendingAuthAttempts(cookies: RequestEvent['cookies'], attempts: PendingAuthAttempt[]) {
+	if (!attempts.length) {
+		cookies.delete(AUTH_PENDING_COOKIE, authCookieOptions(0));
+		return;
+	}
+	cookies.set(AUTH_PENDING_COOKIE, JSON.stringify(attempts), authCookieOptions(AUTH_STATE_MAX_AGE_SEC));
+}
+
+export function setAuthState(
+	cookies: RequestEvent['cookies'],
+	data: { state: string; nonce: string; codeVerifier: string }
+) {
+	const cookieOpts = authCookieOptions(AUTH_STATE_MAX_AGE_SEC);
+	const pending = parsePendingAuthAttempts(cookies.get(AUTH_PENDING_COOKIE))
+		.filter((entry) => entry.state !== data.state)
+		.concat({
+			state: data.state,
+			nonce: data.nonce,
+			codeVerifier: data.codeVerifier,
+			createdAtMs: Date.now()
+		})
+		.slice(-AUTH_PENDING_MAX_ENTRIES);
+	writePendingAuthAttempts(cookies, pending);
 
 	cookies.set(AUTH_STATE_COOKIE, data.state, cookieOpts);
 	cookies.set(AUTH_NONCE_COOKIE, data.nonce, cookieOpts);
 	cookies.set(AUTH_VERIFIER_COOKIE, data.codeVerifier, cookieOpts);
 }
 
-function clearAuthState(cookies: Cookies) {
-	const cookieOpts = {
-		httpOnly: true,
-		secure: COOKIE_SECURE,
-		sameSite: 'lax' as const,
-		path: '/',
-		maxAge: 0
-	};
-	cookies.set(AUTH_STATE_COOKIE, '', cookieOpts);
-	cookies.set(AUTH_NONCE_COOKIE, '', cookieOpts);
-	cookies.set(AUTH_VERIFIER_COOKIE, '', cookieOpts);
+function consumeAuthState(
+	cookies: RequestEvent['cookies'],
+	returnedState: string
+):
+	| { status: 'ok'; nonce: string; codeVerifier: string }
+	| { status: 'missing' | 'invalid' } {
+	const pending = parsePendingAuthAttempts(cookies.get(AUTH_PENDING_COOKIE));
+	if (pending.length) {
+		const index = pending.findIndex((entry) => entry.state === returnedState);
+		if (index === -1) {
+			writePendingAuthAttempts(cookies, pending);
+			return { status: 'invalid' };
+		}
+		const [matched] = pending.splice(index, 1);
+		writePendingAuthAttempts(cookies, pending);
+		return { status: 'ok', nonce: matched.nonce, codeVerifier: matched.codeVerifier };
+	}
+
+	const savedState = cookies.get(AUTH_STATE_COOKIE);
+	const savedNonce = cookies.get(AUTH_NONCE_COOKIE);
+	const codeVerifier = cookies.get(AUTH_VERIFIER_COOKIE);
+	if (!savedState || !savedNonce || !codeVerifier) {
+		return { status: 'missing' };
+	}
+	if (returnedState !== savedState) {
+		return { status: 'invalid' };
+	}
+
+	const clearOpts = authCookieOptions(0);
+	cookies.set(AUTH_STATE_COOKIE, '', clearOpts);
+	cookies.set(AUTH_NONCE_COOKIE, '', clearOpts);
+	cookies.set(AUTH_VERIFIER_COOKIE, '', clearOpts);
+
+	return { status: 'ok', nonce: savedNonce, codeVerifier };
 }
 
 async function createClientAssertion(tokenEndpoint: string): Promise<string> {
@@ -294,27 +367,13 @@ async function verifyIdToken(params: {
 
 async function ensureSessionTable() {
 	const pool = await GetPool();
-	await pool.request().query(`
-		IF OBJECT_ID('dbo.UserSessions', 'U') IS NULL
-		BEGIN
-			CREATE TABLE dbo.UserSessions (
-				SessionId uniqueidentifier NOT NULL PRIMARY KEY,
-				UserOid nvarchar(64) NOT NULL,
-				Email nvarchar(320) NULL,
-				Name nvarchar(256) NULL,
-				AccessToken nvarchar(max) NOT NULL,
-				RefreshToken nvarchar(max) NULL,
-				ExpiresAt datetime2 NOT NULL,
-				ActiveScheduleId int NULL,
-				CreatedAt datetime2 NOT NULL DEFAULT SYSUTCDATETIME()
-			);
-			CREATE INDEX IX_UserSessions_UserOid ON dbo.UserSessions(UserOid);
-		END
-		IF COL_LENGTH('dbo.UserSessions', 'ActiveScheduleId') IS NULL
-		BEGIN
-			ALTER TABLE dbo.UserSessions ADD ActiveScheduleId int NULL;
-		END
-	`);
+	const result = await pool
+		.request()
+		.query(`SELECT OBJECT_ID('dbo.UserSessions', 'U') AS UserSessionsObjectId;`);
+	const tableExists = Boolean(result.recordset?.[0]?.UserSessionsObjectId);
+	if (!tableExists) {
+		throw error(500, 'Missing dbo.UserSessions table. Apply db/schema.sql before running the app.');
+	}
 }
 
 async function ensureUsersTableExtensions() {
@@ -327,6 +386,49 @@ async function ensureUsersTableExtensions() {
 		IF COL_LENGTH('dbo.Users', 'ScheduleUiStateJson') IS NULL
 		BEGIN
 			ALTER TABLE dbo.Users ADD ScheduleUiStateJson nvarchar(max) NULL;
+		END
+		IF COL_LENGTH('dbo.Users', 'OnboardingRole') IS NULL
+		BEGIN
+			ALTER TABLE dbo.Users ADD OnboardingRole tinyint NULL;
+		END
+		IF COL_LENGTH('dbo.Users', 'EntraFirstName') IS NULL
+		BEGIN
+			ALTER TABLE dbo.Users ADD EntraFirstName nvarchar(100) NULL;
+		END
+		IF COL_LENGTH('dbo.Users', 'EntraLastName') IS NULL
+		BEGIN
+			ALTER TABLE dbo.Users ADD EntraLastName nvarchar(100) NULL;
+		END
+		IF COL_LENGTH('dbo.Users', 'OnboardingRole') IS NOT NULL
+		BEGIN
+			EXEC(N'
+				UPDATE dbo.Users
+				   SET OnboardingRole = 0
+				 WHERE OnboardingRole IS NULL
+					OR OnboardingRole NOT BETWEEN 0 AND 3;
+			');
+		END
+		IF OBJECT_ID('dbo.DF_Users_OnboardingRole', 'D') IS NULL
+		BEGIN
+			ALTER TABLE dbo.Users
+			ADD CONSTRAINT DF_Users_OnboardingRole DEFAULT 0 FOR OnboardingRole;
+		END
+		IF EXISTS (
+			SELECT 1
+			FROM sys.columns
+			WHERE object_id = OBJECT_ID('dbo.Users')
+			  AND name = 'OnboardingRole'
+			  AND is_nullable = 1
+		)
+			BEGIN
+				EXEC(N'ALTER TABLE dbo.Users ALTER COLUMN OnboardingRole tinyint NOT NULL;');
+			END
+		IF OBJECT_ID('dbo.CK_Users_OnboardingRole_Valid', 'C') IS NULL
+		BEGIN
+			EXEC(N'
+				ALTER TABLE dbo.Users
+				ADD CONSTRAINT CK_Users_OnboardingRole_Valid CHECK (OnboardingRole BETWEEN 0 AND 3);
+			');
 		END
 		IF COL_LENGTH('dbo.Users', 'ScheduleUiStateJson') IS NOT NULL
 		BEGIN
@@ -377,9 +479,7 @@ async function cleanupSessions() {
 	const pool = await GetPool();
 	await pool
 		.request()
-		.query(
-			'DELETE FROM dbo.UserSessions WHERE ExpiresAt < DATEADD(day, -30, SYSUTCDATETIME());'
-		);
+		.query('DELETE FROM dbo.UserSessions WHERE ExpiresAt < DATEADD(day, -30, SYSUTCDATETIME());');
 }
 
 function isExpired(expiresAt: Date | string | null): boolean {
@@ -398,7 +498,11 @@ async function refreshSessionIfExpired(
 	if (!row.RefreshToken) return null;
 
 	const refreshed = await refreshTokens(row.RefreshToken);
-	if (!refreshed.access_token || !Number.isFinite(refreshed.expires_in) || refreshed.expires_in <= 0) {
+	if (
+		!refreshed.access_token ||
+		!Number.isFinite(refreshed.expires_in) ||
+		refreshed.expires_in <= 0
+	) {
 		return null;
 	}
 
@@ -435,6 +539,8 @@ async function upsertUserProfile(user: Session['user']) {
 		.input('userOid', user.id)
 		.input('fullName', user.name ?? null)
 		.input('displayName', user.name ?? null)
+		.input('entraFirstName', user.givenName ?? null)
+		.input('entraLastName', user.surname ?? null)
 		.input('email', user.email ?? null)
 		.query(
 			`MERGE dbo.Users AS target
@@ -442,6 +548,8 @@ async function upsertUserProfile(user: Session['user']) {
 			 ON target.UserOid = source.UserOid
 			 WHEN MATCHED THEN
 			   UPDATE SET FullName = @fullName,
+						  EntraFirstName = COALESCE(@entraFirstName, target.EntraFirstName),
+						  EntraLastName = COALESCE(@entraLastName, target.EntraLastName),
 						  DisplayName = CASE
 							 WHEN NULLIF(LTRIM(RTRIM(target.DisplayName)), '') IS NULL
 							 THEN @displayName
@@ -450,8 +558,8 @@ async function upsertUserProfile(user: Session['user']) {
 						  Email = @email,
 						  UpdatedAt = SYSUTCDATETIME()
 			 WHEN NOT MATCHED THEN
-			   INSERT (UserOid, FullName, DisplayName, Email)
-			   VALUES (@userOid, @fullName, @displayName, @email);`
+			   INSERT (UserOid, FullName, DisplayName, EntraFirstName, EntraLastName, Email)
+			   VALUES (@userOid, @fullName, @displayName, @entraFirstName, @entraLastName, @email);`
 		);
 }
 
@@ -459,6 +567,23 @@ async function ensureBootstrapManager(user: Session['user']) {
 	const allowed = parseOidList(env.BOOTSTRAP_MANAGER_OIDS);
 	if (!allowed.has(user.id)) return;
 	const pool = await GetPool();
+	if (env.NODE_ENV !== 'production') {
+		const overrideResult = await pool
+			.request()
+			.input('userOid', user.id)
+			.query(
+				`SELECT TOP (1) IsActive, DeletedBy
+				 FROM dbo.BootstrapManagers
+				 WHERE UserOid = @userOid;`
+			);
+		const overrideRow = overrideResult.recordset?.[0];
+		const isDevDisabled =
+			overrideRow?.IsActive === false &&
+			String(overrideRow?.DeletedBy ?? '').trim().toLowerCase() === 'dev_console_disabled';
+		if (isDevDisabled) {
+			return;
+		}
+	}
 	await pool
 		.request()
 		.input('userOid', user.id)
@@ -525,42 +650,41 @@ export async function finishLogin(event: RequestEvent): Promise<Session | null> 
 		throw error(400, 'Missing code or state');
 	}
 
-	const savedState = event.cookies.get(AUTH_STATE_COOKIE);
-	const savedNonce = event.cookies.get(AUTH_NONCE_COOKIE);
-	const codeVerifier = event.cookies.get(AUTH_VERIFIER_COOKIE);
-
-	if (!savedState || !savedNonce || !codeVerifier) {
+	const authState = consumeAuthState(event.cookies, state);
+	if (authState.status === 'missing') {
 		throw error(401, 'Missing auth state');
 	}
-	if (state !== savedState) {
+	if (authState.status === 'invalid') {
 		throw error(401, 'Invalid state');
 	}
-
-	clearAuthState(event.cookies);
 
 	const redirectUri = requireEnv('ENTRA_REDIRECT_URI');
 	const tokens = await exchangeCodeForTokens({
 		code,
-		codeVerifier,
+		codeVerifier: authState.codeVerifier,
 		redirectUri
 	});
 	if (!tokens.id_token) {
 		throw error(500, 'Missing id_token in token response');
 	}
 
-	const claims = await verifyIdToken({ idToken: tokens.id_token, nonce: savedNonce });
+	const claims = await verifyIdToken({ idToken: tokens.id_token, nonce: authState.nonce });
 
 	const id = (claims.oid || claims.sub) as string | undefined;
 	if (!id) {
 		throw error(401, 'Missing oid/sub in id_token');
 	}
+	const givenName = (claims.given_name as string | undefined) ?? undefined;
+	const surname = (claims.family_name as string | undefined) ?? undefined;
+	const fallbackName = [givenName, surname].filter(Boolean).join(' ').trim();
+	const resolvedName = (claims.name as string | undefined)?.trim() || fallbackName || undefined;
 
 	const user: Session['user'] = {
 		id,
-		email: (claims.email || claims.preferred_username || claims.upn) as
-			| string
-			| undefined,
-		name: (claims.name as string | undefined) ?? undefined
+		email: (claims.email || claims.preferred_username || claims.upn) as string | undefined,
+		name: resolvedName,
+		givenName,
+		surname
 	};
 
 	if (!tokens.access_token) {

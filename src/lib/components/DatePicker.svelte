@@ -22,6 +22,7 @@
 	export let min = '';
 	export let max = '';
 	export let depth: PickerDepth = 'day';
+	export let allowNone = true;
 	export let onOpenChange: (next: boolean) => void = () => {};
 
 	const dispatch = createEventDispatcher<{ select: string; change: string }>();
@@ -573,14 +574,16 @@
 		{/if}
 
 		<div class="datePickerFooter">
-			<button
-				type="button"
-				class="datePickerFooterBtn datePickerFooterBtnNone"
-				on:click={clearSelection}
-				disabled={!value}
-			>
-				None
-			</button>
+			{#if allowNone}
+				<button
+					type="button"
+					class="datePickerFooterBtn datePickerFooterBtnNone"
+					on:click={clearSelection}
+					disabled={!value}
+				>
+					None
+				</button>
+			{/if}
 			<button type="button" class="datePickerFooterBtn" on:click={selectToday}>
 				{todayActionLabel}
 			</button>

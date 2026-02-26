@@ -145,6 +145,7 @@ Defined in compose/env files outside this directory:
 - `ENTRA_CLIENT_CERT_PUBLIC_CERT_PATH`
 - `APP_SESSION_SECRET`
 - `BOOTSTRAP_MANAGER_OIDS`
+- `DEV_CONSOLE_ALLOWED_OIDS` (optional, dev-only console command allowlist)
 
 `BOOTSTRAP_MANAGER_OIDS` delimiter support:
 - comma, semicolon, or whitespace.

@@ -162,6 +162,12 @@
   border-radius: 13px 13px 0px 0px;
 }
 
+.topbarActions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .title {
   font-weight: 980;
   letter-spacing: 0.03em;
@@ -191,6 +197,43 @@
   outline: none;
   box-shadow: var(--focus-ring);
   border-radius: 6px;
+}
+
+.onboardingHelpBtn {
+  appearance: none;
+  width: 38px;
+  height: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 12px;
+  border: 1px solid var(--interactive-border);
+  background: var(--interactive-bg);
+  color: var(--text);
+  font-size: 18px;
+  line-height: 1;
+  font-weight: 900;
+  cursor: pointer;
+  transition:
+    transform 0.06s ease,
+    background 0.12s ease,
+    border-color 0.12s ease,
+    box-shadow 0.12s ease;
+}
+
+.onboardingHelpBtn:hover {
+  background: var(--interactive-bg-hover);
+  border-color: var(--interactive-border-hover);
+  box-shadow: var(--shadow-soft);
+}
+
+.onboardingHelpBtn:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.onboardingHelpBtn:active {
+  transform: translateY(1px);
 }
 
 .legend {
@@ -985,7 +1028,7 @@ select:focus {
   padding-top: 8px;
   border-top: 1px solid var(--grid-2);
   display: flex;
-  justify-content: space-between;
+  justify-content: flex-end;
   gap: 8px;
 }
 

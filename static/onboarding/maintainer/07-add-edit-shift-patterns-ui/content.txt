@@ -1,0 +1,10 @@
+Add/Edit Shift Patterns UI
+Use these screens to create or update shift patterns.
+
+Adjust pattern details carefully, since pattern changes can affect schedule interpretation.
+
+The pattern editor attempts to intelligently interpret a pattern for the coloring as it is applied.
+The pattern editor supports up to four distinct colors and has a "No Coverage" tool in the top right corner.
+
+28 days are available for defining a pattern.
+The pattern that is deduced will be extrapolated between the start and end dates of any shift that it is applied to.

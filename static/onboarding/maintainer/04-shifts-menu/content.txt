@@ -1,0 +1,6 @@
+Shifts Menu
+Use the Shifts menu to view or manage the schedule's shift list.
+
+This section defines which shifts exist and how they are organized on the schedule.
+
+Only shifts that are available during the selected month will be visible on this list.

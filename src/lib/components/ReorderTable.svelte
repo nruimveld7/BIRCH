@@ -359,7 +359,7 @@
 <svelte:window on:keydown={onWindowKeydown} />
 
 <HorizontalScrollArea>
-	<table class="setupTable shiftsWorkshopTable" bind:this={tableEl} on:pointerdown={onHandlePointerDown}>
+	<table class="setupTable shiftsTimelineTable" bind:this={tableEl} on:pointerdown={onHandlePointerDown}>
 		<colgroup>
 			<col class="shiftColHandle" />
 			<col class="shiftColName" />

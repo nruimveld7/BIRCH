@@ -11,6 +11,7 @@ type ScheduleMembership = {
 	IsDefault: boolean;
 	IsActive: boolean;
 	ThemeJson: string | null;
+	VersionAt: string | Date;
 };
 
 export const GET: RequestHandler = async ({ locals, cookies }) => {
@@ -46,6 +47,7 @@ export const GET: RequestHandler = async ({ locals, cookies }) => {
 					r.RoleName,
 					s.IsActive,
 					s.ThemeJson,
+					COALESCE(s.UpdatedAt, s.CreatedAt) AS VersionAt,
 					CAST(CASE WHEN su.ScheduleId = @defaultScheduleId THEN 1 ELSE 0 END AS bit) AS IsDefault,
 					ROW_NUMBER() OVER (
 						PARTITION BY su.ScheduleId
@@ -69,7 +71,7 @@ export const GET: RequestHandler = async ({ locals, cookies }) => {
 				  AND s.DeletedAt IS NULL
 				  AND (s.IsActive = 1 OR r.RoleName = 'Manager')
 			)
-			SELECT ScheduleId, Name, RoleName, IsDefault, IsActive, ThemeJson
+			SELECT ScheduleId, Name, RoleName, IsDefault, IsActive, ThemeJson, VersionAt
 			FROM RankedMemberships
 			WHERE RoleRank = 1
 			ORDER BY IsDefault DESC, Name;`

@@ -1,12 +1,14 @@
 <script lang="ts">
 	import { afterUpdate, onDestroy, onMount, tick } from 'svelte';
 	import { browser } from '$app/environment';
+	import { goto } from '$app/navigation';
 	import { base } from '$app/paths';
 	import ThemeToggle from '$lib/components/ThemeToggle.svelte';
 	import MonthYearBar from '$lib/components/MonthYearBar.svelte';
 	import ScheduleGrid from '$lib/components/ScheduleGrid.svelte';
 	import TeamSetupModal from '$lib/components/TeamSetupModal.svelte';
 	import ScheduleSetupModal from '$lib/components/ScheduleSetupModal.svelte';
+	import OnboardingTourModal from '$lib/components/OnboardingTourModal.svelte';
 	import type { Employee, Group, ScheduleEvent, Status } from '$lib/types/schedule';
 	import { fetchWithAuthRedirect } from '$lib/utils/fetchWithAuthRedirect';
 	import { buildMonthDays, monthNames } from '$lib/utils/date';
@@ -21,6 +23,15 @@
 		IsDefault: boolean;
 		IsActive: boolean;
 		ThemeJson?: string | null;
+		VersionAt?: string | Date | null;
+	};
+	type OnboardingSlide = {
+		id: string;
+		role: ScheduleRole;
+		roleTier: number;
+		title: string;
+		description: string;
+		imageUrl: string | null;
 	};
 	type ThemeMode = 'dark' | 'light';
 	type ThemeFieldKey =
@@ -164,6 +175,11 @@
 	export let currentUserOid = '';
 	export let collapsedGroupsBySchedule: Record<number, Record<string, boolean>> = {};
 	export let themePreference: ThemePreference = 'system';
+	export let onboarding: { currentTier: number; targetTier: number; slides: OnboardingSlide[] } = {
+		currentTier: 0,
+		targetTier: 0,
+		slides: []
+	};
 
 	let teamSetupOpen = false;
 	let scheduleSetupOpen = false;
@@ -185,12 +201,25 @@
 	let lastRequestedMonthViewKey = `${selectedYear}-${selectedMonthIndex}`;
 	let activeScheduleThemeSignature = '';
 	let lastAppliedThemeSignature = '';
+	let scheduleContextPollTimer: ReturnType<typeof setInterval> | null = null;
+	let scheduleContextRefreshInFlight = false;
 	let displayNameEditorOpen = false;
 	let displayNameEditorUserOid = '';
 	let displayNameEditorCurrentName = '';
 	let displayNameEditorDraft = '';
 	let displayNameEditorError = '';
 	let displayNameEditorSaving = false;
+	let onboardingOpen = false;
+	let onboardingSlideIndex = 0;
+	let onboardingDontShowAgain = false;
+	let onboardingSaving = false;
+	let onboardingDismissedForSession = false;
+	let onboardingSaveError = '';
+	let onboardingSlidesSource: 'auto' | 'manual' = 'auto';
+	let onboardingSlidesForModal: OnboardingSlide[] = onboarding.slides;
+	let onboardingTargetTierForModal = onboarding.targetTier;
+	let onboardingCurrentTierState = onboarding.currentTier;
+	let popupResetToken = 0;
 
 	function normalizeHexColor(value: string, fallback: string): string {
 		const trimmed = value.trim().toLowerCase();
@@ -438,6 +467,134 @@
 			return;
 		}
 		applyThemeOverrides(parsed);
+	}
+
+	function normalizeVersionAt(value: unknown): string {
+		if (value instanceof Date) {
+			return Number.isFinite(value.getTime()) ? value.toISOString() : '';
+		}
+		if (typeof value !== 'string') return '';
+		const trimmed = value.trim();
+		if (!trimmed) return '';
+		const parsed = new Date(trimmed);
+		return Number.isFinite(parsed.getTime()) ? parsed.toISOString() : trimmed;
+	}
+
+	function membershipSignature(memberships: ScheduleMembership[]): string {
+		return [...memberships]
+			.sort((left, right) => left.ScheduleId - right.ScheduleId)
+			.map((membership) =>
+				[
+					membership.ScheduleId,
+					membership.Name,
+					membership.RoleName,
+					membership.IsDefault ? '1' : '0',
+					membership.IsActive ? '1' : '0',
+					membership.ThemeJson ?? '',
+					normalizeVersionAt(membership.VersionAt)
+				].join(':')
+			)
+			.join('|');
+	}
+
+	function buildLoadedScheduleContextSignature(
+		nextActiveScheduleId: number | null,
+		nextMemberships: ScheduleMembership[]
+	): string {
+		return `${nextActiveScheduleId ?? 'none'}|${membershipSignature(nextMemberships)}`;
+	}
+
+	function accessLevelSignature(memberships: ScheduleMembership[]): string {
+		return [...memberships]
+			.sort((left, right) => left.ScheduleId - right.ScheduleId)
+			.map((membership) => [membership.ScheduleId, membership.RoleName, membership.IsActive ? '1' : '0'].join(':'))
+			.join('|');
+	}
+
+	function resolveScheduleNameFromMemberships(
+		memberships: ScheduleMembership[],
+		resolvedScheduleId: number | null,
+		fallbackName: string
+	): string {
+		const activeMembership =
+			memberships.find((membership) => membership.ScheduleId === resolvedScheduleId) ??
+			memberships.find((membership) => membership.IsDefault) ??
+			memberships[0] ??
+			null;
+		return activeMembership?.Name?.trim() || fallbackName;
+	}
+
+	function handleScheduleMembershipsRefresh(
+		nextMemberships: ScheduleMembership[],
+		nextActiveScheduleId: number | null
+	) {
+		scheduleMemberships = nextMemberships;
+		if (nextActiveScheduleId !== null) {
+			activeScheduleId = nextActiveScheduleId;
+		}
+		scheduleName = resolveScheduleNameFromMemberships(
+			nextMemberships,
+			nextActiveScheduleId ?? activeScheduleId,
+			scheduleName
+		);
+	}
+
+	function closeAllPopups() {
+		teamSetupOpen = false;
+		scheduleSetupOpen = false;
+		closeDisplayNameEditor(true);
+		onboardingOpen = false;
+		popupResetToken += 1;
+	}
+
+	async function refreshScheduleContextInBackground(): Promise<boolean> {
+		if (!browser || scheduleContextRefreshInFlight) return false;
+		scheduleContextRefreshInFlight = true;
+		try {
+			const response = await fetchWithAuthRedirect(
+				`${base}/api/schedules/memberships`,
+				{ headers: { accept: 'application/json' } },
+				base
+			);
+			if (!response) return false;
+			if (!response.ok) {
+				if (response.status === 400 || response.status === 403) {
+					await goto(`${base}/`, { invalidateAll: true, replaceState: true, noScroll: true });
+					return true;
+				}
+				return false;
+			}
+			const payload = (await response.json()) as {
+				activeScheduleId?: number | null;
+				memberships?: ScheduleMembership[];
+			};
+			const serverMemberships = Array.isArray(payload.memberships) ? payload.memberships : [];
+			const serverActiveScheduleId =
+				typeof payload.activeScheduleId === 'number' ? payload.activeScheduleId : null;
+			const currentSignature = buildLoadedScheduleContextSignature(
+				activeScheduleId,
+				scheduleMemberships
+			);
+			const serverSignature = buildLoadedScheduleContextSignature(
+				serverActiveScheduleId,
+				serverMemberships
+			);
+			const currentAccessLevelSignature = accessLevelSignature(scheduleMemberships);
+			const serverAccessLevelSignature = accessLevelSignature(serverMemberships);
+			if (serverAccessLevelSignature !== currentAccessLevelSignature) {
+				closeAllPopups();
+			}
+			if (serverSignature !== currentSignature) {
+				await goto(`${base}/`, { invalidateAll: true, replaceState: true, noScroll: true });
+				return true;
+			}
+			return false;
+		} catch {
+			// Background refresh errors should not interrupt the current view.
+			return false;
+		} finally {
+			scheduleContextRefreshInFlight = false;
+		}
 	}
 
 	function clamp(value: number, min: number, max: number): number {
@@ -796,13 +953,116 @@
 		teamSetupOpen = false;
 	}
 
-	function openScheduleSetup() {
+	async function openScheduleSetup() {
 		if (!canOpenScheduleSetup) return;
+		await refreshScheduleContextInBackground();
 		scheduleSetupOpen = true;
 	}
 
 	function closeScheduleSetup() {
 		scheduleSetupOpen = false;
+	}
+
+	function resetOnboardingModalToServerSlides() {
+		onboardingSlidesSource = 'auto';
+		onboardingSlidesForModal = onboarding.slides;
+		onboardingTargetTierForModal = onboarding.targetTier;
+	}
+
+	async function openOnboardingFromHelp() {
+		if (onboardingSaving) return;
+		onboardingSaveError = '';
+		try {
+			const response = await fetchWithAuthRedirect(
+				`${base}/api/onboarding/slides`,
+				{ headers: { accept: 'application/json' } },
+				base
+			);
+			if (!response) return;
+			if (!response.ok) {
+				onboardingSaveError = 'Unable to load onboarding steps. Please try again.';
+				return;
+			}
+			const payload = (await response.json().catch(() => null)) as
+				| { slides?: OnboardingSlide[]; targetTier?: number; currentTier?: number }
+				| null;
+			const fetchedSlides = Array.isArray(payload?.slides) ? payload.slides : [];
+			const fetchedTargetTier = Number.isInteger(payload?.targetTier)
+				? Number(payload?.targetTier)
+				: onboarding.targetTier;
+			const fetchedCurrentTier = Number.isInteger(payload?.currentTier)
+				? Number(payload?.currentTier)
+				: onboardingCurrentTierState;
+			onboardingSlidesSource = 'manual';
+			onboardingSlidesForModal = fetchedSlides;
+			onboardingTargetTierForModal = Math.max(0, Math.min(3, fetchedTargetTier));
+			onboardingCurrentTierState = Math.max(
+				onboardingCurrentTierState,
+				Math.max(0, Math.min(3, fetchedCurrentTier))
+			);
+			onboardingSlideIndex = 0;
+			onboardingDontShowAgain = false;
+			onboardingDismissedForSession = false;
+			onboardingOpen = onboardingSlidesForModal.length > 0;
+			if (!onboardingOpen) {
+				resetOnboardingModalToServerSlides();
+			}
+		} catch {
+			onboardingSaveError = 'Unable to load onboarding steps. Please try again.';
+		}
+	}
+
+	async function persistOnboardingToTargetRole(): Promise<boolean> {
+		if (onboardingSaving || onboardingTargetTierForModal <= onboardingCurrentTierState) {
+			return true;
+		}
+		onboardingSaving = true;
+		onboardingSaveError = '';
+		try {
+			const response = await fetchWithAuthRedirect(
+				`${base}/api/onboarding/role`,
+				{
+					method: 'PATCH',
+					headers: { 'content-type': 'application/json' },
+					body: JSON.stringify({ onboardingRole: onboardingTargetTierForModal })
+				},
+				base
+			);
+			if (!response || !response.ok) {
+				onboardingSaveError = 'Unable to save onboarding progress. Please try again.';
+				return false;
+			}
+			onboardingCurrentTierState = Math.max(
+				onboardingCurrentTierState,
+				onboardingTargetTierForModal
+			);
+			return true;
+		} finally {
+			onboardingSaving = false;
+		}
+	}
+
+	async function handleOnboardingClose(event: CustomEvent<{ markComplete: boolean }>) {
+		const shouldMarkComplete = Boolean(event.detail?.markComplete);
+		if (shouldMarkComplete) {
+			const success = await persistOnboardingToTargetRole();
+			if (!success) return;
+		}
+		onboardingOpen = false;
+		onboardingDismissedForSession = true;
+		onboardingDontShowAgain = false;
+		onboardingSaveError = '';
+		resetOnboardingModalToServerSlides();
+	}
+
+	async function handleOnboardingComplete() {
+		const success = await persistOnboardingToTargetRole();
+		if (!success) return;
+		onboardingOpen = false;
+		onboardingDismissedForSession = true;
+		onboardingDontShowAgain = false;
+		onboardingSaveError = '';
+		resetOnboardingModalToServerSlides();
 	}
 
 	function closeDisplayNameEditor(force = false) {
@@ -900,6 +1160,9 @@
 			);
 			if (requestId !== scheduleGroupsRequestId) return;
 			if (!response.ok) {
+				if (response.status === 400 || response.status === 403) {
+					await goto(`${base}/`, { invalidateAll: true, replaceState: true, noScroll: true });
+				}
 				scheduleGroups = [];
 				scheduleEvents = [];
 				scheduleGroupsLoaded = true;
@@ -932,7 +1195,10 @@
 	}
 
 	async function refreshScheduleInBackground() {
-		await loadScheduleGroupsForMonth(selectedYear, selectedMonthIndex);
+		await Promise.all([
+			loadScheduleGroupsForMonth(selectedYear, selectedMonthIndex),
+			refreshScheduleContextInBackground()
+		]);
 	}
 
 	function syncCollapsedWithGroups(scheduleId: number, nextGroups: Group[]) {
@@ -1009,10 +1275,33 @@
 		applyActiveScheduleTheme();
 		lastAppliedThemeSignature = activeScheduleThemeSignature;
 		initialThemeReady = true;
+		if (onboarding.slides.length > 0 && !onboardingDismissedForSession) {
+			onboardingSlidesSource = 'auto';
+			onboardingSlidesForModal = onboarding.slides;
+			onboardingTargetTierForModal = onboarding.targetTier;
+			onboardingOpen = true;
+		}
+		scheduleContextPollTimer = setInterval(() => {
+			if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
+			void refreshScheduleInBackground();
+		}, 30000);
+		const handleVisibilityOrFocus = () => {
+			if (document.visibilityState === 'visible') {
+				void refreshScheduleInBackground();
+			}
+		};
+		document.addEventListener('visibilitychange', handleVisibilityOrFocus);
+		window.addEventListener('focus', handleVisibilityOrFocus);
 		requestAnimationFrame(updateAppScrollbar);
 		const onResize = () => updateAppScrollbar();
 		window.addEventListener('resize', onResize);
 		return () => {
+			if (scheduleContextPollTimer) {
+				clearInterval(scheduleContextPollTimer);
+				scheduleContextPollTimer = null;
+			}
+			document.removeEventListener('visibilitychange', handleVisibilityOrFocus);
+			window.removeEventListener('focus', handleVisibilityOrFocus);
 			window.removeEventListener('resize', onResize);
 			if (!themeMediaQuery) return;
 			if (typeof themeMediaQuery.removeEventListener === 'function') {
@@ -1035,6 +1324,30 @@
 			document.body.classList.remove('app-shell-route');
 		}
 	});
+
+	$: if (
+		initialThemeReady &&
+		onboarding.slides.length > 0 &&
+		!onboardingDismissedForSession &&
+		!onboardingOpen
+	) {
+		onboardingSlidesSource = 'auto';
+		onboardingSlidesForModal = onboarding.slides;
+		onboardingTargetTierForModal = onboarding.targetTier;
+		onboardingOpen = true;
+	}
+	$: if (
+		onboardingSlidesSource === 'auto' &&
+		!onboardingOpen &&
+		onboardingSlidesForModal !== onboarding.slides
+	) {
+		onboardingSlidesForModal = onboarding.slides;
+		onboardingTargetTierForModal = onboarding.targetTier;
+	}
+	$: onboardingCurrentTierState = Math.max(onboardingCurrentTierState, onboarding.currentTier);
+	$: if (onboardingSlideIndex >= onboardingSlidesForModal.length) {
+		onboardingSlideIndex = Math.max(0, onboardingSlidesForModal.length - 1);
+	}
 </script>
 
 {#if !initialThemeReady}
@@ -1061,12 +1374,23 @@
 					{:else}
 						<div class="title">{scheduleName}</div>
 					{/if}
-					<ThemeToggle
-						mode="cycle"
-						themePreference={themePreferenceState}
-						effectiveTheme={theme}
-						onToggle={toggleTheme}
-					/>
+					<div class="topbarActions">
+						<ThemeToggle
+							mode="cycle"
+							themePreference={themePreferenceState}
+							effectiveTheme={theme}
+							onToggle={toggleTheme}
+						/>
+						<button
+							type="button"
+							class="onboardingHelpBtn"
+							aria-label="Open onboarding guide"
+							title="Open onboarding guide"
+							on:click={openOnboardingFromHelp}
+						>
+							?
+						</button>
+					</div>
 				</div>
 
 				{#if showLegend}
@@ -1100,6 +1424,7 @@
 						{selectedYear}
 						{selectedMonthIndex}
 						{theme}
+						{popupResetToken}
 						onToggleGroup={toggleGroup}
 						{canMaintainTeam}
 						onTeamClick={openTeamSetup}
@@ -1151,6 +1476,7 @@
 		{scheduleMemberships}
 		currentThemeMode={theme}
 		onThemeModeChange={handleScheduleSetupThemeModeChange}
+		onMembershipsRefresh={handleScheduleMembershipsRefresh}
 		onClose={closeScheduleSetup}
 	/>
 
@@ -1209,4 +1535,17 @@
 			</div>
 		</div>
 	{/if}
+
+	<OnboardingTourModal
+		open={onboardingOpen}
+		slides={onboardingSlidesForModal}
+		currentIndex={onboardingSlideIndex}
+		dontShowAgain={onboardingDontShowAgain}
+		isSaving={onboardingSaving}
+		errorMessage={onboardingSaveError}
+		on:indexChange={(event) => (onboardingSlideIndex = event.detail)}
+		on:dontShowAgainChange={(event) => (onboardingDontShowAgain = event.detail)}
+		on:close={handleOnboardingClose}
+		on:complete={handleOnboardingComplete}
+	/>
 {/if}

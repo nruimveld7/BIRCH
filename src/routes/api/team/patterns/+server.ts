@@ -13,6 +13,7 @@ type PatternRow = {
 	PatternJson: string;
 	ShiftUsageCount: number;
 	ActiveShiftUsageCount: number;
+	ModifiedAt?: Date | string | null;
 };
 
 type SwatchPayload = {
@@ -48,6 +49,26 @@ function cleanOptionalText(value: unknown, maxLength: number): string | null {
 	const trimmed = value.trim();
 	if (!trimmed) return null;
 	return trimmed.slice(0, maxLength);
+}
+
+function cleanRequiredVersionStamp(value: unknown, label: string): string {
+	if (typeof value !== 'string') {
+		throw error(400, `${label} is required`);
+	}
+	const trimmed = value.trim();
+	if (!trimmed) {
+		throw error(400, `${label} is required`);
+	}
+	return trimmed.slice(0, 200);
+}
+
+function toDateTimeIso(value: Date | string | null | undefined): string | null {
+	if (!value) return null;
+	if (value instanceof Date) return value.toISOString();
+	if (typeof value !== 'string') return null;
+	const parsed = new Date(value);
+	if (Number.isNaN(parsed.getTime())) return null;
+	return parsed.toISOString();
 }
 
 async function getActorContext(localsUserOid: string, cookies: Cookies) {
@@ -94,7 +115,7 @@ async function employeeTypeVersionsEnabled(
 		`SELECT TOP (1) 1 AS HasTable
 		 FROM INFORMATION_SCHEMA.TABLES
 		 WHERE TABLE_SCHEMA = 'dbo'
-		   AND TABLE_NAME = 'EmployeeTypeVersions';`
+		   AND TABLE_NAME = 'ShiftEdits';`
 	);
 	return Number(result.recordset?.[0]?.HasTable ?? 0) === 1;
 }
@@ -344,17 +365,18 @@ export const GET: RequestHandler = async ({ locals, cookies }) => {
 				p.Name,
 				p.PatternSummary,
 				p.PatternJson,
+				COALESCE(p.UpdatedAt, p.CreatedAt) AS ModifiedAt,
 				(
-					SELECT COUNT(DISTINCT etv.EmployeeTypeId)
-					FROM dbo.EmployeeTypeVersions etv
+					SELECT COUNT(DISTINCT etv.ShiftId)
+					FROM dbo.ShiftEdits etv
 					WHERE etv.ScheduleId = p.ScheduleId
 					  AND etv.PatternId = p.PatternId
 					  AND etv.IsActive = 1
 					  AND etv.DeletedAt IS NULL
 				) AS ShiftUsageCount,
 				(
-					SELECT COUNT(DISTINCT etv.EmployeeTypeId)
-					FROM dbo.EmployeeTypeVersions etv
+					SELECT COUNT(DISTINCT etv.ShiftId)
+					FROM dbo.ShiftEdits etv
 					WHERE etv.ScheduleId = p.ScheduleId
 					  AND etv.PatternId = p.PatternId
 					  AND etv.IsActive = 1
@@ -372,17 +394,18 @@ export const GET: RequestHandler = async ({ locals, cookies }) => {
 				p.Name,
 				p.PatternSummary,
 				p.PatternJson,
+				COALESCE(p.UpdatedAt, p.CreatedAt) AS ModifiedAt,
 				(
-					SELECT COUNT(DISTINCT et.EmployeeTypeId)
-					FROM dbo.EmployeeTypes et
+					SELECT COUNT(DISTINCT et.ShiftId)
+					FROM dbo.Shifts et
 					WHERE et.ScheduleId = p.ScheduleId
 					  AND et.PatternId = p.PatternId
 					  AND et.IsActive = 1
 					  AND et.DeletedAt IS NULL
 				) AS ShiftUsageCount,
 				(
-					SELECT COUNT(DISTINCT et.EmployeeTypeId)
-					FROM dbo.EmployeeTypes et
+					SELECT COUNT(DISTINCT et.ShiftId)
+					FROM dbo.Shifts et
 					WHERE et.ScheduleId = p.ScheduleId
 					  AND et.PatternId = p.PatternId
 					  AND et.IsActive = 1
@@ -429,7 +452,8 @@ export const GET: RequestHandler = async ({ locals, cookies }) => {
 			noShiftDays,
 			isInUse: Number(row.ActiveShiftUsageCount ?? 0) > 0,
 			isActivelyInUse: Number(row.ActiveShiftUsageCount ?? 0) > 0,
-			hasAnyUsage: Number(row.ShiftUsageCount ?? 0) > 0
+			hasAnyUsage: Number(row.ShiftUsageCount ?? 0) > 0,
+			versionStamp: `${Number(row.PatternId)}|${toDateTimeIso(row.ModifiedAt) ?? '0'}`
 		};
 	});
 
@@ -521,6 +545,7 @@ export const PATCH: RequestHandler = async ({ locals, cookies, request }) => {
 	const { pool, scheduleId } = await getActorContext(currentUser.id, cookies);
 	const body = await request.json().catch(() => null);
 	const patternId = Number(body?.patternId);
+	const expectedVersionStamp = cleanRequiredVersionStamp(body?.expectedVersionStamp, 'Version stamp');
 	if (!Number.isInteger(patternId) || patternId <= 0) {
 		throw error(400, 'Pattern ID is required');
 	}
@@ -535,15 +560,24 @@ export const PATCH: RequestHandler = async ({ locals, cookies, request }) => {
 		.input('scheduleId', scheduleId)
 		.input('patternId', patternId)
 		.query(
-			`SELECT TOP (1) PatternId
+			`SELECT TOP (1) PatternId, COALESCE(UpdatedAt, CreatedAt) AS ModifiedAt
 			 FROM dbo.Patterns
 			 WHERE ScheduleId = @scheduleId
 			   AND PatternId = @patternId
 			   AND IsActive = 1
 			   AND DeletedAt IS NULL;`
 		);
-	if (!existsResult.recordset?.[0]?.PatternId) {
+	const existingRow = existsResult.recordset?.[0] as
+		| { PatternId?: number; ModifiedAt?: Date | string | null }
+		| undefined;
+	if (!existingRow?.PatternId) {
 		throw error(404, 'Pattern not found');
+	}
+	const currentVersionStamp = `${Number(existingRow.PatternId)}|${
+		toDateTimeIso(existingRow.ModifiedAt) ?? '0'
+	}`;
+	if (currentVersionStamp !== expectedVersionStamp) {
+		throw error(409, 'This pattern has changed. Refresh and try again.');
 	}
 
 	const swatches = assertSwatches(body?.swatches);
@@ -625,6 +659,7 @@ export const DELETE: RequestHandler = async ({ locals, cookies, request }) => {
 	const hasVersions = await employeeTypeVersionsEnabled(pool);
 	const body = await request.json().catch(() => null);
 	const patternId = Number(body?.patternId);
+	const expectedVersionStamp = cleanRequiredVersionStamp(body?.expectedVersionStamp, 'Version stamp');
 	const confirmActiveRemoval = body?.confirmActiveRemoval === true;
 	if (!Number.isInteger(patternId) || patternId <= 0) {
 		throw error(400, 'Pattern ID is required');
@@ -635,15 +670,24 @@ export const DELETE: RequestHandler = async ({ locals, cookies, request }) => {
 		.input('scheduleId', scheduleId)
 		.input('patternId', patternId)
 		.query(
-			`SELECT TOP (1) PatternId
+			`SELECT TOP (1) PatternId, COALESCE(UpdatedAt, CreatedAt) AS ModifiedAt
 			 FROM dbo.Patterns
 			 WHERE ScheduleId = @scheduleId
 			   AND PatternId = @patternId
 			   AND IsActive = 1
 			   AND DeletedAt IS NULL;`
 		);
-	if (!existsResult.recordset?.[0]?.PatternId) {
+	const existingRow = existsResult.recordset?.[0] as
+		| { PatternId?: number; ModifiedAt?: Date | string | null }
+		| undefined;
+	if (!existingRow?.PatternId) {
 		throw error(404, 'Pattern not found');
+	}
+	const currentVersionStamp = `${Number(existingRow.PatternId)}|${
+		toDateTimeIso(existingRow.ModifiedAt) ?? '0'
+	}`;
+	if (currentVersionStamp !== expectedVersionStamp) {
+		throw error(409, 'This pattern has changed. Refresh and try again.');
 	}
 
 	const usageResult = await pool
@@ -654,16 +698,16 @@ export const DELETE: RequestHandler = async ({ locals, cookies, request }) => {
 			hasVersions
 				? `SELECT
 				(
-					SELECT COUNT(DISTINCT etv.EmployeeTypeId)
-					FROM dbo.EmployeeTypeVersions etv
+					SELECT COUNT(DISTINCT etv.ShiftId)
+					FROM dbo.ShiftEdits etv
 					WHERE etv.ScheduleId = @scheduleId
 					  AND etv.PatternId = @patternId
 					  AND etv.IsActive = 1
 					  AND etv.DeletedAt IS NULL
 				) AS ShiftUsageCount,
 				(
-					SELECT COUNT(DISTINCT etv.EmployeeTypeId)
-					FROM dbo.EmployeeTypeVersions etv
+					SELECT COUNT(DISTINCT etv.ShiftId)
+					FROM dbo.ShiftEdits etv
 					WHERE etv.ScheduleId = @scheduleId
 					  AND etv.PatternId = @patternId
 					  AND etv.IsActive = 1
@@ -672,9 +716,9 @@ export const DELETE: RequestHandler = async ({ locals, cookies, request }) => {
 					  AND (etv.EndDate IS NULL OR etv.EndDate >= CAST(SYSUTCDATETIME() AS date))
 				) AS ActiveShiftUsageCount;`
 				: `SELECT
-				COUNT(DISTINCT et.EmployeeTypeId) AS ShiftUsageCount,
-				COUNT(DISTINCT et.EmployeeTypeId) AS ActiveShiftUsageCount
-			 FROM dbo.EmployeeTypes et
+				COUNT(DISTINCT et.ShiftId) AS ShiftUsageCount,
+				COUNT(DISTINCT et.ShiftId) AS ActiveShiftUsageCount
+			 FROM dbo.Shifts et
 			 WHERE et.ScheduleId = @scheduleId
 			   AND et.PatternId = @patternId
 			   AND et.IsActive = 1
@@ -721,10 +765,10 @@ export const DELETE: RequestHandler = async ({ locals, cookies, request }) => {
 							 EndedBy = @actorUserOid,
 							 UpdatedAt = SYSUTCDATETIME(),
 							 UpdatedBy = @actorUserOid
-						 FROM dbo.EmployeeTypeVersions etv
+						 FROM dbo.ShiftEdits etv
 						 INNER JOIN (
-							SELECT cur.ScheduleId, cur.EmployeeTypeId, cur.StartDate
-							FROM dbo.EmployeeTypeVersions cur
+							SELECT cur.ScheduleId, cur.ShiftId, cur.StartDate
+							FROM dbo.ShiftEdits cur
 							WHERE cur.ScheduleId = @scheduleId
 							  AND cur.PatternId = @patternId
 							  AND cur.IsActive = 1
@@ -733,7 +777,7 @@ export const DELETE: RequestHandler = async ({ locals, cookies, request }) => {
 							  AND (cur.EndDate IS NULL OR cur.EndDate >= @effectiveDate)
 						 ) active_rows
 							ON active_rows.ScheduleId = etv.ScheduleId
-						   AND active_rows.EmployeeTypeId = etv.EmployeeTypeId
+						   AND active_rows.ShiftId = etv.ShiftId
 						   AND active_rows.StartDate = etv.StartDate
 						 WHERE etv.ScheduleId = @scheduleId
 						   AND etv.IsActive = 1
@@ -762,12 +806,12 @@ export const DELETE: RequestHandler = async ({ locals, cookies, request }) => {
 							 END,
 							 UpdatedAt = SYSUTCDATETIME(),
 							 UpdatedBy = @actorUserOid
-						 FROM dbo.EmployeeTypeVersions etv
+						 FROM dbo.ShiftEdits etv
 						 OUTER APPLY (
 							SELECT TOP (1) future.StartDate AS NextStartDate
-							FROM dbo.EmployeeTypeVersions future
+							FROM dbo.ShiftEdits future
 							WHERE future.ScheduleId = etv.ScheduleId
-							  AND future.EmployeeTypeId = etv.EmployeeTypeId
+							  AND future.ShiftId = etv.ShiftId
 							  AND future.IsActive = 1
 							  AND future.DeletedAt IS NULL
 							  AND future.StartDate > @effectiveDate
@@ -787,9 +831,9 @@ export const DELETE: RequestHandler = async ({ locals, cookies, request }) => {
 					.input('effectiveDate', serverDate)
 					.input('actorUserOid', currentUser.id)
 					.query(
-						`INSERT INTO dbo.EmployeeTypeVersions (
+						`INSERT INTO dbo.ShiftEdits (
 							ScheduleId,
-							EmployeeTypeId,
+							ShiftId,
 							StartDate,
 							EndDate,
 							Name,
@@ -798,7 +842,7 @@ export const DELETE: RequestHandler = async ({ locals, cookies, request }) => {
 						)
 						SELECT
 							@scheduleId,
-							active_rows.EmployeeTypeId,
+							active_rows.ShiftId,
 							@effectiveDate,
 							CASE
 								WHEN active_rows.NextStartDate IS NULL THEN NULL
@@ -809,19 +853,19 @@ export const DELETE: RequestHandler = async ({ locals, cookies, request }) => {
 							@actorUserOid
 						FROM (
 							SELECT
-								cur.EmployeeTypeId,
+								cur.ShiftId,
 								cur.Name,
 								(
 									SELECT TOP (1) future.StartDate
-									FROM dbo.EmployeeTypeVersions future
+									FROM dbo.ShiftEdits future
 									WHERE future.ScheduleId = cur.ScheduleId
-									  AND future.EmployeeTypeId = cur.EmployeeTypeId
+									  AND future.ShiftId = cur.ShiftId
 									  AND future.IsActive = 1
 									  AND future.DeletedAt IS NULL
 									  AND future.StartDate > @effectiveDate
 									ORDER BY future.StartDate ASC
 								) AS NextStartDate
-							FROM dbo.EmployeeTypeVersions cur
+							FROM dbo.ShiftEdits cur
 							WHERE cur.ScheduleId = @scheduleId
 							  AND cur.PatternId = @patternId
 							  AND cur.IsActive = 1
@@ -830,9 +874,9 @@ export const DELETE: RequestHandler = async ({ locals, cookies, request }) => {
 							  AND (cur.EndDate IS NULL OR cur.EndDate >= @effectiveDate)
 							  AND NOT EXISTS (
 									SELECT 1
-									FROM dbo.EmployeeTypeVersions exact_row
+									FROM dbo.ShiftEdits exact_row
 									WHERE exact_row.ScheduleId = cur.ScheduleId
-									  AND exact_row.EmployeeTypeId = cur.EmployeeTypeId
+									  AND exact_row.ShiftId = cur.ShiftId
 									  AND exact_row.StartDate = @effectiveDate
 									  AND exact_row.IsActive = 1
 									  AND exact_row.DeletedAt IS NULL
@@ -850,15 +894,15 @@ export const DELETE: RequestHandler = async ({ locals, cookies, request }) => {
 							 et.StartDate = latest.StartDate,
 							 et.UpdatedAt = SYSUTCDATETIME(),
 							 et.UpdatedBy = @actorUserOid
-						FROM dbo.EmployeeTypes et
+						FROM dbo.Shifts et
 						CROSS APPLY (
 							SELECT TOP (1)
 								etv.Name,
 								etv.PatternId,
 								etv.StartDate
-							FROM dbo.EmployeeTypeVersions etv
+							FROM dbo.ShiftEdits etv
 							WHERE etv.ScheduleId = et.ScheduleId
-							  AND etv.EmployeeTypeId = et.EmployeeTypeId
+							  AND etv.ShiftId = et.ShiftId
 							  AND etv.IsActive = 1
 							  AND etv.DeletedAt IS NULL
 							ORDER BY etv.StartDate DESC
@@ -873,7 +917,7 @@ export const DELETE: RequestHandler = async ({ locals, cookies, request }) => {
 					.input('patternId', patternId)
 					.input('actorUserOid', currentUser.id)
 					.query(
-						`UPDATE dbo.EmployeeTypes
+						`UPDATE dbo.Shifts
 						 SET PatternId = NULL,
 							 UpdatedAt = SYSUTCDATETIME(),
 							 UpdatedBy = @actorUserOid

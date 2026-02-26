@@ -1,4 +1,6 @@
 <script lang="ts">
+	import { createEventDispatcher } from 'svelte';
+
 	export let id = '';
 	export let checked = false;
 	export let disabled = false;
@@ -6,9 +8,12 @@
 	export let description = '';
 	export let compact = false;
 
+	const dispatch = createEventDispatcher<{ change: { checked: boolean } }>();
+
 	function handleChange(event: Event) {
 		const input = event.currentTarget as HTMLInputElement;
 		checked = input.checked;
+		dispatch('change', { checked });
 	}
 </script>
 

@@ -5,23 +5,22 @@ import { getActiveScheduleId } from '$lib/server/auth';
 import { resolveShiftOrderForMonth } from '$lib/server/shift-order';
 
 type ShiftSectionRow = {
-	EmployeeTypeId: number;
+	ShiftId: number;
 	DisplayOrder: number;
 	Name: string | null;
 };
 
 type AssignmentMemberRow = {
-	EmployeeTypeId: number;
+	ShiftId: number;
 	UserOid: string;
 	UserName: string | null;
 	RoleName: string | null;
-	DisplayOrder: number;
 	StartDate: Date | string;
 	EndDate: Date | string | null;
 };
 
 type ShiftVersionRow = {
-	EmployeeTypeId: number;
+	ShiftId: number;
 	StartDate: Date | string;
 	EndDate: Date | string | null;
 	PatternId: number | null;
@@ -37,10 +36,10 @@ type EventDisplayMode = 'Schedule Overlay' | 'Badge Indicator' | 'Shift Override
 type ScheduleEventRow = {
 	EventId: number;
 	UserOid: string | null;
-	EmployeeTypeId: number | null;
+	ShiftId: number | null;
 	StartDate: Date | string;
 	EndDate: Date | string;
-	CoverageCodeId: number | null;
+	EventCodeId: number | null;
 	CustomDisplayMode: EventDisplayMode | null;
 	CustomColor: string | null;
 	CoverageDisplayMode: EventDisplayMode | null;
@@ -59,7 +58,9 @@ type ParsedPattern = {
 	swatchByIndex: Map<number, PatternSwatch>;
 	selectedOwnerByDay: Map<number, number>;
 	predictionBySwatchIndex: Map<number, PredictionModel>;
+	ownerByCycleDay: Map<number, number>;
 	dayColorByCycleDay: Map<number, string>;
+	cycleLength: number;
 };
 
 function cleanYear(value: string | null): number {
@@ -166,6 +167,7 @@ function buildPatternCycleColors(
 	noShiftDays: Set<number>
 ): {
 	dayColorByCycleDay: Map<number, string>;
+	ownerByCycleDay: Map<number, number>;
 	selectedOwnerByDay: Map<number, number>;
 	swatchByIndex: Map<number, PatternSwatch>;
 	predictionBySwatchIndex: Map<number, PredictionModel>;
@@ -190,6 +192,7 @@ function buildPatternCycleColors(
 	}
 
 	const dayColorByCycleDay = new Map<number, string>();
+	const ownerByCycleDay = new Map<number, number>();
 	for (const day of PATTERN_EDITOR_DAYS) {
 		if (noShiftDays.has(day)) continue;
 
@@ -197,6 +200,7 @@ function buildPatternCycleColors(
 		if (explicitOwner !== undefined) {
 			const explicitSwatch = swatchByIndex.get(explicitOwner);
 			if (explicitSwatch) {
+				ownerByCycleDay.set(day, explicitOwner);
 				dayColorByCycleDay.set(day, explicitSwatch.color);
 			}
 			continue;
@@ -212,16 +216,33 @@ function buildPatternCycleColors(
 		predictedOwners.sort((a, b) => a - b);
 		const chosen = swatchByIndex.get(predictedOwners[0]);
 		if (chosen) {
+			ownerByCycleDay.set(day, chosen.swatchIndex);
 			dayColorByCycleDay.set(day, chosen.color);
 		}
 	}
 
 	return {
 		dayColorByCycleDay,
+		ownerByCycleDay,
 		selectedOwnerByDay,
 		swatchByIndex,
 		predictionBySwatchIndex
 	};
+}
+
+function detectPatternCycleLength(ownerByCycleDay: Map<number, number>): number {
+	const resolvedOwnerSeries = PATTERN_EDITOR_DAYS.map((day) => ownerByCycleDay.get(day) ?? null);
+	for (let cycleLength = 1; cycleLength <= PATTERN_EDITOR_DAYS.length; cycleLength += 1) {
+		let matches = true;
+		for (let dayIndex = 0; dayIndex + cycleLength < resolvedOwnerSeries.length; dayIndex += 1) {
+			if (resolvedOwnerSeries[dayIndex] !== resolvedOwnerSeries[dayIndex + cycleLength]) {
+				matches = false;
+				break;
+			}
+		}
+		if (matches) return cycleLength;
+	}
+	return PATTERN_EDITOR_DAYS.length;
 }
 
 function parsePattern(value: string | null | undefined): ParsedPattern | null {
@@ -261,17 +282,21 @@ function parsePattern(value: string | null | undefined): ParsedPattern | null {
 		);
 		const {
 			dayColorByCycleDay,
+			ownerByCycleDay,
 			selectedOwnerByDay,
 			swatchByIndex,
 			predictionBySwatchIndex
 		} = buildPatternCycleColors(swatches, noShiftDays);
+		const cycleLength = detectPatternCycleLength(ownerByCycleDay);
 		return {
 			swatches,
 			noShiftDays,
 			swatchByIndex,
 			selectedOwnerByDay,
 			predictionBySwatchIndex,
-			dayColorByCycleDay
+			ownerByCycleDay,
+			dayColorByCycleDay,
+			cycleLength
 		};
 	} catch {
 		return null;
@@ -280,36 +305,8 @@ function parsePattern(value: string | null | undefined): ParsedPattern | null {
 
 function colorForPatternDay(pattern: ParsedPattern | null, dayNumber: number): string | null {
 	if (!pattern) return null;
-	const dayInEditorCycle = ((dayNumber - 1) % 28 + 28) % 28 + 1;
-
-	const predictedOwners: number[] = [];
-	for (const [swatchIndex, prediction] of pattern.predictionBySwatchIndex) {
-		const cycleLength = prediction.onDays + prediction.offDays;
-		if (cycleLength <= 0) continue;
-		const offsetFromAnchor = dayNumber - prediction.anchor;
-		const cycleIndex = ((offsetFromAnchor % cycleLength) + cycleLength) % cycleLength;
-		if (cycleIndex < prediction.onDays) {
-			predictedOwners.push(swatchIndex);
-		}
-	}
-	if (predictedOwners.length > 0) {
-		predictedOwners.sort((a, b) => a - b);
-		return pattern.swatchByIndex.get(predictedOwners[0])?.color ?? null;
-	}
-
-	// Beyond the first 28 seed days, avoid repeating explicit editor assignments
-	// when a prediction model exists; keep those dates OFF unless predicted.
-	if (dayNumber > 28 && pattern.predictionBySwatchIndex.size > 0) {
-		return null;
-	}
-
-	if (pattern.noShiftDays.has(dayInEditorCycle)) return null;
-
-	const explicitOwner = pattern.selectedOwnerByDay.get(dayInEditorCycle);
-	if (explicitOwner !== undefined) {
-		return pattern.swatchByIndex.get(explicitOwner)?.color ?? null;
-	}
-
+	const cycleLength = Math.max(1, Math.min(pattern.cycleLength, PATTERN_EDITOR_DAYS.length));
+	const dayInEditorCycle = ((dayNumber - 1) % cycleLength + cycleLength) % cycleLength + 1;
 	return pattern.dayColorByCycleDay.get(dayInEditorCycle) ?? null;
 }
 
@@ -327,12 +324,12 @@ async function employeeTypeVersionsEnabled(
 		`SELECT TOP (1) 1 AS HasTable
 		 FROM INFORMATION_SCHEMA.TABLES
 		 WHERE TABLE_SCHEMA = 'dbo'
-		   AND TABLE_NAME = 'EmployeeTypeVersions';`
+		   AND TABLE_NAME = 'ShiftEdits';`
 	);
 	return Number(result.recordset?.[0]?.HasTable ?? 0) === 1;
 }
 
-async function scheduleEventsHasEmployeeTypeId(
+async function scheduleEventsHasShiftId(
 	pool: Awaited<ReturnType<typeof GetPool>>
 ): Promise<boolean> {
 	const result = await pool.request().query(
@@ -340,7 +337,7 @@ async function scheduleEventsHasEmployeeTypeId(
 		 FROM INFORMATION_SCHEMA.COLUMNS
 		 WHERE TABLE_SCHEMA = 'dbo'
 		   AND TABLE_NAME = 'ScheduleEvents'
-		   AND COLUMN_NAME = 'EmployeeTypeId';`
+		   AND COLUMN_NAME = 'ShiftId';`
 	);
 	return Number(result.recordset?.[0]?.HasColumn ?? 0) === 1;
 }
@@ -397,7 +394,7 @@ export const GET: RequestHandler = async ({ locals, cookies, url }) => {
 	const { monthStart, monthEnd } = monthRange(year, monthIndex);
 	const { pool, scheduleId } = await getViewerContext(currentUser.id, cookies);
 	const hasVersions = await employeeTypeVersionsEnabled(pool);
-	const hasEventEmployeeTypeId = await scheduleEventsHasEmployeeTypeId(pool);
+	const hasEventShiftId = await scheduleEventsHasShiftId(pool);
 	const hasEventCustomColumns = await scheduleEventsHasCustomColumns(pool);
 
 	const result = await pool
@@ -408,15 +405,15 @@ export const GET: RequestHandler = async ({ locals, cookies, url }) => {
 		.query(
 				hasVersions
 					? `SELECT
-						et.EmployeeTypeId,
+						et.ShiftId,
 						COALESCE(vMonthEnd.DisplayOrder, vWindowLatest.DisplayOrder, et.DisplayOrder) AS DisplayOrder,
 						COALESCE(vMonthEnd.Name, vWindowLatest.Name, et.Name) AS Name
-					FROM dbo.EmployeeTypes et
+					FROM dbo.Shifts et
 					OUTER APPLY (
 						SELECT TOP (1) etv.Name, etv.DisplayOrder
-						FROM dbo.EmployeeTypeVersions etv
+						FROM dbo.ShiftEdits etv
 						WHERE etv.ScheduleId = et.ScheduleId
-						  AND etv.EmployeeTypeId = et.EmployeeTypeId
+						  AND etv.ShiftId = et.ShiftId
 					  AND etv.IsActive = 1
 					  AND etv.DeletedAt IS NULL
 					  AND etv.StartDate <= @monthEnd
@@ -425,9 +422,9 @@ export const GET: RequestHandler = async ({ locals, cookies, url }) => {
 					) vMonthEnd
 					OUTER APPLY (
 						SELECT TOP (1) etv.Name, etv.DisplayOrder
-						FROM dbo.EmployeeTypeVersions etv
+						FROM dbo.ShiftEdits etv
 						WHERE etv.ScheduleId = et.ScheduleId
-						  AND etv.EmployeeTypeId = et.EmployeeTypeId
+						  AND etv.ShiftId = et.ShiftId
 					  AND etv.IsActive = 1
 					  AND etv.DeletedAt IS NULL
 					  AND etv.StartDate <= @monthEnd
@@ -439,33 +436,33 @@ export const GET: RequestHandler = async ({ locals, cookies, url }) => {
 				  AND et.DeletedAt IS NULL
 				  AND EXISTS (
 					SELECT 1
-					FROM dbo.EmployeeTypeVersions etv
+					FROM dbo.ShiftEdits etv
 					WHERE etv.ScheduleId = et.ScheduleId
-					  AND etv.EmployeeTypeId = et.EmployeeTypeId
+					  AND etv.ShiftId = et.ShiftId
 					  AND etv.IsActive = 1
 					  AND etv.DeletedAt IS NULL
 						  AND etv.StartDate <= @monthEnd
 						  AND (etv.EndDate IS NULL OR etv.EndDate >= @monthStart)
 					  )
-					ORDER BY DisplayOrder ASC, Name ASC, et.EmployeeTypeId ASC;`
+					ORDER BY DisplayOrder ASC, Name ASC, et.ShiftId ASC;`
 				: `SELECT
-					et.EmployeeTypeId,
+					et.ShiftId,
 					et.DisplayOrder,
 					et.Name
-				FROM dbo.EmployeeTypes et
+				FROM dbo.Shifts et
 				WHERE et.ScheduleId = @scheduleId
 				  AND et.IsActive = 1
 				  AND et.DeletedAt IS NULL
 				  AND et.StartDate <= @monthEnd
-					ORDER BY et.DisplayOrder ASC, et.Name ASC, et.EmployeeTypeId ASC;`
+					ORDER BY et.DisplayOrder ASC, et.Name ASC, et.ShiftId ASC;`
 		);
 
 const shiftRows = (result.recordset as ShiftSectionRow[]).map((row) => ({
-		employeeTypeId: Number(row.EmployeeTypeId),
-		category: row.Name?.trim() || `Shift ${row.EmployeeTypeId}`
+		employeeTypeId: Number(row.ShiftId),
+		category: row.Name?.trim() || `Shift ${row.ShiftId}`
 	}));
 	const fallbackShiftOrder = (result.recordset as ShiftSectionRow[]).map((row) =>
-		Number(row.EmployeeTypeId)
+		Number(row.ShiftId)
 	);
 	const orderedShiftIds = await resolveShiftOrderForMonth({
 		runner: pool,
@@ -489,14 +486,13 @@ const shiftRows = (result.recordset as ShiftSectionRow[]).map((row) => ({
 		.input('monthEnd', monthEnd)
 		.query(
 			`SELECT
-				sut.EmployeeTypeId,
+				sut.ShiftId,
 				sut.UserOid,
 				COALESCE(NULLIF(u.DisplayName, ''), NULLIF(u.FullName, ''), sut.UserOid) AS UserName,
 				rolePick.RoleName,
-				sut.DisplayOrder,
 				sut.StartDate,
 				sut.EndDate
-			 FROM dbo.ScheduleUserTypes sut
+			 FROM dbo.ScheduleAssignments sut
 			 LEFT JOIN dbo.Users u
 				ON u.UserOid = sut.UserOid
 			   AND u.DeletedAt IS NULL
@@ -522,11 +518,77 @@ const shiftRows = (result.recordset as ShiftSectionRow[]).map((row) => ({
 			   AND sut.DeletedAt IS NULL
 			   AND sut.StartDate <= @monthEnd
 			   AND (sut.EndDate IS NULL OR sut.EndDate >= @monthStart)
-			 ORDER BY sut.EmployeeTypeId ASC, sut.DisplayOrder ASC, sut.StartDate DESC, sut.UserOid ASC;`
+			 ORDER BY sut.ShiftId ASC, sut.StartDate DESC, sut.UserOid ASC;`
 		);
 
 	const shiftIds = Array.from(new Set(shiftRows.map((row) => row.employeeTypeId)));
 	const shiftIdSet = new Set(shiftIds);
+	const assignmentOrderByShiftUser = new Map<string, number>();
+
+	const assignmentRows = assignmentsResult.recordset as AssignmentMemberRow[];
+	for (const shiftId of shiftIds) {
+		const activeUsersForShift = assignmentRows
+			.filter((row) => Number(row.ShiftId) === shiftId)
+			.map((row) => row.UserOid)
+			.filter((userOid, index, list) => list.indexOf(userOid) === index);
+		if (activeUsersForShift.length === 0) continue;
+		const fallbackOrder = assignmentRows
+			.filter((row) => Number(row.ShiftId) === shiftId)
+			.sort(
+				(a, b) => a.UserOid.localeCompare(b.UserOid)
+			)
+			.map((row) => row.UserOid)
+			.filter((userOid, index, list) => list.indexOf(userOid) === index);
+
+		const monthRow = await pool
+			.request()
+			.input('scheduleId', scheduleId)
+			.input('shiftId', shiftId)
+			.input('monthStart', monthStart)
+			.query(
+				`SELECT TOP (1) EffectiveMonth
+				 FROM dbo.ScheduleAssignmentOrders
+				 WHERE ScheduleId = @scheduleId
+				   AND ShiftId = @shiftId
+				   AND EffectiveMonth <= @monthStart
+				 ORDER BY EffectiveMonth DESC;`
+			);
+		const resolvedMonth = toDateOnly(monthRow.recordset?.[0]?.EffectiveMonth ?? null);
+		const orderedUsers: string[] = [];
+		if (resolvedMonth) {
+			const orderRows = await pool
+				.request()
+				.input('scheduleId', scheduleId)
+				.input('shiftId', shiftId)
+				.input('effectiveMonth', resolvedMonth)
+				.query(
+					`SELECT UserOid
+					 FROM dbo.ScheduleAssignmentOrders
+					 WHERE ScheduleId = @scheduleId
+					   AND ShiftId = @shiftId
+					   AND EffectiveMonth = @effectiveMonth
+					 ORDER BY DisplayOrder ASC, UserOid ASC;`
+				);
+			for (const row of orderRows.recordset as Array<{ UserOid: string }>) {
+				if (activeUsersForShift.includes(row.UserOid) && !orderedUsers.includes(row.UserOid)) {
+					orderedUsers.push(row.UserOid);
+				}
+			}
+		}
+		for (const userOid of fallbackOrder) {
+			if (activeUsersForShift.includes(userOid) && !orderedUsers.includes(userOid)) {
+				orderedUsers.push(userOid);
+			}
+		}
+		for (const userOid of activeUsersForShift) {
+			if (!orderedUsers.includes(userOid)) {
+				orderedUsers.push(userOid);
+			}
+		}
+		for (let index = 0; index < orderedUsers.length; index += 1) {
+			assignmentOrderByShiftUser.set(`${shiftId}|${orderedUsers[index]}`, index + 1);
+		}
+	}
 
 	const versionsResult = await pool
 		.request()
@@ -536,34 +598,34 @@ const shiftRows = (result.recordset as ShiftSectionRow[]).map((row) => ({
 		.query(
 			hasVersions
 				? `SELECT
-					etv.EmployeeTypeId,
+					etv.ShiftId,
 					etv.StartDate,
 					etv.EndDate,
 					etv.PatternId
-				FROM dbo.EmployeeTypeVersions etv
+				FROM dbo.ShiftEdits etv
 				WHERE etv.ScheduleId = @scheduleId
 				  AND etv.IsActive = 1
 				  AND etv.DeletedAt IS NULL
 				  AND etv.StartDate <= @monthEnd
 				  AND (etv.EndDate IS NULL OR etv.EndDate >= @monthStart)
-				ORDER BY etv.EmployeeTypeId ASC, etv.StartDate DESC, etv.CreatedAt DESC;`
+				ORDER BY etv.ShiftId ASC, etv.StartDate DESC, etv.CreatedAt DESC;`
 				: `SELECT
-					et.EmployeeTypeId,
+					et.ShiftId,
 					et.StartDate,
 					CAST(NULL AS date) AS EndDate,
 					et.PatternId
-				FROM dbo.EmployeeTypes et
+				FROM dbo.Shifts et
 				WHERE et.ScheduleId = @scheduleId
 				  AND et.IsActive = 1
 				  AND et.DeletedAt IS NULL
 				  AND et.StartDate <= @monthEnd
-				ORDER BY et.EmployeeTypeId ASC, et.StartDate DESC;`
+				ORDER BY et.ShiftId ASC, et.StartDate DESC;`
 		);
 
 	const versionsByShift = new Map<number, Array<{ startDate: string; endDate: string | null; patternId: number | null }>>();
 	const patternIds = new Set<number>();
 	for (const versionRow of versionsResult.recordset as ShiftVersionRow[]) {
-		const employeeTypeId = Number(versionRow.EmployeeTypeId);
+		const employeeTypeId = Number(versionRow.ShiftId);
 		if (!shiftIdSet.has(employeeTypeId)) continue;
 		const startDate = toDateOnly(versionRow.StartDate);
 		if (!startDate) continue;
@@ -624,8 +686,8 @@ const shiftRows = (result.recordset as ShiftSectionRow[]).map((row) => ({
 		dayColors: Record<number, string>;
 	}>();
 
-	for (const row of assignmentsResult.recordset as AssignmentMemberRow[]) {
-		const employeeTypeId = Number(row.EmployeeTypeId);
+	for (const row of assignmentRows) {
+		const employeeTypeId = Number(row.ShiftId);
 		if (!shiftIdSet.has(employeeTypeId)) continue;
 		const assignmentStart = toDateOnly(row.StartDate);
 		if (!assignmentStart) continue;
@@ -665,15 +727,24 @@ const shiftRows = (result.recordset as ShiftSectionRow[]).map((row) => ({
 		}
 	}
 
+	for (const [shiftId, members] of membersByShift.entries()) {
+		members.sort((a, b) => {
+			const aOrder = assignmentOrderByShiftUser.get(`${shiftId}|${a.userOid}`) ?? Number.MAX_SAFE_INTEGER;
+			const bOrder = assignmentOrderByShiftUser.get(`${shiftId}|${b.userOid}`) ?? Number.MAX_SAFE_INTEGER;
+			if (aOrder !== bOrder) return aOrder - bOrder;
+			return a.name.localeCompare(b.name);
+		});
+	}
+
 	const groups = shiftRows.map((row) => ({
 		employeeTypeId: row.employeeTypeId,
 		category: row.category,
 		employees: membersByShift.get(row.employeeTypeId) ?? []
 	}));
 
-	const selectEventEmployeeTypeId = hasEventEmployeeTypeId
-		? 'se.EmployeeTypeId'
-		: 'CAST(NULL AS int) AS EmployeeTypeId';
+	const selectEventShiftId = hasEventShiftId
+		? 'se.ShiftId'
+		: 'CAST(NULL AS int) AS ShiftId';
 	const selectEventCustomDisplayMode = hasEventCustomColumns
 		? 'se.CustomDisplayMode'
 		: "CAST(NULL AS nvarchar(30)) AS CustomDisplayMode";
@@ -690,18 +761,18 @@ const shiftRows = (result.recordset as ShiftSectionRow[]).map((row) => ({
 			`SELECT
 				se.EventId,
 				se.UserOid,
-				${selectEventEmployeeTypeId},
+				${selectEventShiftId},
 				se.StartDate,
 				se.EndDate,
-				se.CoverageCodeId,
+				se.EventCodeId,
 				${selectEventCustomDisplayMode},
 				${selectEventCustomColor},
 				cc.DisplayMode AS CoverageDisplayMode,
 				cc.Color AS CoverageColor
 			 FROM dbo.ScheduleEvents se
-			 LEFT JOIN dbo.CoverageCodes cc
+			 LEFT JOIN dbo.EventCodes cc
 			   ON cc.ScheduleId = se.ScheduleId
-			  AND cc.CoverageCodeId = se.CoverageCodeId
+			  AND cc.EventCodeId = se.EventCodeId
 			 WHERE se.ScheduleId = @scheduleId
 			   AND se.IsActive = 1
 			   AND se.DeletedAt IS NULL
@@ -713,13 +784,13 @@ const shiftRows = (result.recordset as ShiftSectionRow[]).map((row) => ({
 	const events = (eventsResult.recordset as ScheduleEventRow[]).map((row) => {
 		const userOid = row.UserOid?.trim() || null;
 		const employeeTypeId =
-			row.EmployeeTypeId === null || row.EmployeeTypeId === undefined
+			row.ShiftId === null || row.ShiftId === undefined
 				? null
-				: Number(row.EmployeeTypeId);
+				: Number(row.ShiftId);
 		const scopeType = userOid ? 'user' : employeeTypeId !== null ? 'shift' : 'global';
 		const displayMode =
-			(row.CoverageCodeId ? row.CoverageDisplayMode : row.CustomDisplayMode) ?? 'Schedule Overlay';
-		const color = (row.CoverageCodeId ? row.CoverageColor : row.CustomColor)?.trim() || '#22c55e';
+			(row.EventCodeId ? row.CoverageDisplayMode : row.CustomDisplayMode) ?? 'Schedule Overlay';
+		const color = (row.EventCodeId ? row.CoverageColor : row.CustomColor)?.trim() || '#22c55e';
 		return {
 			eventId: Number(row.EventId),
 			scopeType,
