@@ -1,4 +1,10 @@
-SET QUOTED_IDENTIFIER ON;
+/*
+  ELM seed script (starter).
+  Add deterministic sample data when core tables are defined.
+*/
+
 SET NOCOUNT ON;
 
-SELECT CAST('No seed data is defined.' AS nvarchar(200)) AS Message;
+SELECT SchemaVersion, AppliedAt, Notes
+FROM dbo.SchemaInfo
+ORDER BY SchemaVersion;

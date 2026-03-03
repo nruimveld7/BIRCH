@@ -13,13 +13,13 @@
 </script>
 
 <svelte:head>
-	<title>{isNotFound ? 'Shift Schedule - 404 Not Found' : 'Shift Schedule - Error'}</title>
+	<title>{isNotFound ? 'ELM - 404 Not Found' : 'ELM - Error'}</title>
 	<meta
 		name="description"
 		content={
 			isNotFound
-				? 'The requested Shift Schedule page could not be found.'
-				: 'An unexpected error occurred while loading Shift Schedule.'
+				? 'The requested ELM page could not be found.'
+				: 'An unexpected error occurred while loading ELM.'
 		}
 	/>
 </svelte:head>
@@ -49,10 +49,10 @@
 		place-items: center;
 		padding: 40px 20px;
 		background:
-			radial-gradient(900px 500px at 20% 15%, rgba(200, 16, 46, 0.16), transparent 60%),
-			radial-gradient(900px 500px at 80% 10%, rgba(38, 78, 255, 0.14), transparent 55%),
-			linear-gradient(180deg, rgba(10, 10, 12, 0.98), rgba(12, 12, 16, 0.98));
-		color: #f7f7f8;
+			radial-gradient(900px 500px at 20% 15%, rgba(55, 96, 255, 0.12), transparent 60%),
+			radial-gradient(900px 500px at 80% 10%, rgba(30, 39, 62, 0.2), transparent 55%),
+			linear-gradient(180deg, rgba(244, 247, 255, 0.98), rgba(233, 238, 248, 0.98));
+		color: #1b2131;
 	}
 
 	.panel {
@@ -60,12 +60,11 @@
 		display: grid;
 		gap: 16px;
 		text-align: center;
-		background: rgba(20, 20, 26, 0.82);
-		border: 1px solid rgba(200, 16, 46, 0.5);
+		background: rgba(255, 255, 255, 0.92);
+		border: 1px solid rgba(64, 84, 126, 0.24);
 		border-radius: 16px;
 		padding: 34px;
-		box-shadow: 0 20px 52px rgba(0, 0, 0, 0.4);
-		backdrop-filter: blur(10px);
+		box-shadow: 0 20px 52px rgba(26, 33, 50, 0.14);
 	}
 
 	.badge {
@@ -76,8 +75,8 @@
 		text-transform: uppercase;
 		padding: 6px 12px;
 		border-radius: 999px;
-		background: rgba(200, 16, 46, 0.2);
-		border: 1px solid rgba(200, 16, 46, 0.6);
+		background: rgba(55, 96, 255, 0.12);
+		border: 1px solid rgba(55, 96, 255, 0.45);
 	}
 
 	h1 {
@@ -88,12 +87,12 @@
 	p {
 		margin: 0;
 		line-height: 1.55;
-		color: rgba(247, 247, 248, 0.86);
+		color: rgba(23, 30, 46, 0.86);
 	}
 
 	.meta {
 		font-size: 0.84rem;
-		color: rgba(247, 247, 248, 0.65);
+		color: rgba(23, 30, 46, 0.65);
 	}
 
 	.actions {
@@ -111,8 +110,8 @@
 
 	.primary {
 		color: #fff;
-		background: rgba(200, 16, 46, 0.75);
-		border: 1px solid rgba(255, 106, 131, 0.75);
+		background: rgba(55, 96, 255, 0.9);
+		border: 1px solid rgba(84, 120, 255, 0.9);
 	}
 
 	@media (max-width: 640px) {
