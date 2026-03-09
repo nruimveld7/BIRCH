@@ -1,39 +1,30 @@
 <script lang="ts">
-	import { page } from '$app/stores';
-
-	const DEFAULT_MESSAGE = 'An unexpected error occurred while loading this page.';
-
-	$: status = $page.status ?? 500;
-	$: message = $page.error?.message ?? DEFAULT_MESSAGE;
-	$: isNotFound = status === 404;
-	$: title = isNotFound ? 'Page Not Found' : 'Something Went Wrong';
-	$: description = isNotFound
-		? 'The page you requested does not exist or may have moved.'
-		: message;
+	export let data: {
+		reason: string;
+		status: string;
+		title: string;
+		description: string;
+		helpText: string;
+	};
 </script>
 
 <svelte:head>
-	<title>{isNotFound ? 'BIRCH - 404 Not Found' : 'BIRCH - Error'}</title>
+	<title>BIRCH - Sign-In Problem</title>
 	<meta
 		name="description"
-		content={
-			isNotFound
-				? 'The requested BIRCH page could not be found.'
-				: 'An unexpected error occurred while loading BIRCH.'
-		}
+		content="Sign-in could not be completed. Retry login to continue to BIRCH."
 	/>
 </svelte:head>
 
-<main class="error-page">
+<main class="auth-error">
 	<section class="panel" role="alert" aria-live="assertive">
-		<div class="badge">{isNotFound ? '404 Not Found' : 'Application Error'}</div>
-		<h1>{title}</h1>
-		<p>{description}</p>
-		{#if !isNotFound}
-			<div class="meta">Status: {status}</div>
-		{/if}
+		<div class="badge">Authentication Error</div>
+		<h1>{data.title}</h1>
+		<p>{data.description}</p>
+		<p class="help">{data.helpText}</p>
+		<div class="meta">Status: {data.status}</div>
 		<div class="actions">
-			<a class="primary" href="/">Go to Home</a>
+			<a class="primary" href="/">Try Again</a>
 		</div>
 	</section>
 </main>
@@ -43,7 +34,7 @@
 		margin: 0;
 	}
 
-	.error-page {
+	.auth-error {
 		min-height: 100vh;
 		display: grid;
 		place-items: center;
@@ -91,6 +82,10 @@
 		color: rgba(247, 247, 248, 0.86);
 	}
 
+	.help {
+		color: rgba(247, 247, 248, 0.72);
+	}
+
 	.meta {
 		font-size: 0.84rem;
 		color: rgba(247, 247, 248, 0.65);
@@ -98,6 +93,8 @@
 
 	.actions {
 		display: flex;
+		flex-wrap: wrap;
+		gap: 10px;
 		justify-content: center;
 		padding-top: 6px;
 	}

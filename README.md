@@ -1,22 +1,34 @@
-# Equipment Lifecycle Manager (ELM)
+# BIRCH
 
-SvelteKit + TypeScript starter shell for the Equipment Lifecycle Manager project.
+Business Identity, Roles, and Chain-of-command Hub
 
-## Current State
+Configurable platform for creating and managing personnel hierarchies in an intuitive way.
 
-This repository has been reset from the prior Shift Schedule implementation to provide a clean starting point:
+## Status
 
-- No authentication flow.
-- No legacy schedule APIs.
-- Minimal backend route: `GET /api/health`.
-- Minimal SQL baseline in `db/schema.sql`.
-- Prior Shift Schedule components/utilities are preserved under `legacy/shift-schedule/` for optional reuse during migration.
+This project is in early scaffolding. Core personnel hierarchy management workflows are still being built.
 
-## Development
+## Vision
 
-Run from this directory:
+- Build and manage personnel hierarchies visually.
+- Support clear role-based permissions and governance.
+- Make chain-of-command relationships easy to understand and maintain.
+- Keep the UI intuitive for non-technical users.
+
+## Tech Stack
+
+- `SvelteKit`
+- `TypeScript`
+- `Microsoft SQL Server`
+- `Microsoft Entra ID` authentication
+- `Docker` + `nginx` for local/container runtime
+
+## Local Development
+
+From this repo:
 
 ```bash
+yarn install
 yarn dev
 ```
 
@@ -30,20 +42,27 @@ yarn test:unit
 
 ## Database
 
-Apply baseline schema:
+Schema and seed files live in:
 
-```bash
-/bin/bash -lc "set -a; source ../.env.dev; set +a; ../scripts/SqlRun.sh dev elm < db/schema.sql"
-```
+- `db/schema.sql`
+- `db/seed.sql`
 
-Run starter seed script:
+Apply schema/seed using your local SQL workflow/scripts for this environment.
 
-```bash
-/bin/bash -lc "set -a; source ../.env.dev; set +a; ../scripts/SqlRun.sh dev elm < db/seed.sql"
-```
+## Project Structure
 
-## Next Build Targets
+- `src/` application code
+- `src/routes/` route handlers and pages
+- `src/lib/` shared client/server modules
+- `db/` SQL schema and seed data
+- `docs/` product and technical specs
 
-- Define ELM domain model and tables (equipment, lifecycle states, events, ownership, and audits).
-- Reintroduce auth and authorization when access rules are ready.
-- Build API routes around finalized domain use-cases.
+## Documentation Roadmap
+
+As implementation progresses, expand this README with:
+
+- Setup prerequisites and env vars
+- Auth flow details
+- Role matrix and access rules
+- API endpoint documentation
+- Deployment/runbook notes

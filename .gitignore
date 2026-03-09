@@ -6,11 +6,18 @@ node_modules
 .netlify
 .wrangler
 /.svelte-kit
+.svelte-kit-local
 /build
+dist
+coverage
 
 # OS
 .DS_Store
 Thumbs.db
+
+# IDE/editor
+.vscode
+.idea
 
 # Env
 .env
@@ -22,14 +29,28 @@ Thumbs.db
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 
+# TypeScript/tooling caches
+*.tsbuildinfo
+.eslintcache
+
 # Yarn local state
 .yarn/install-state.gz
 
 # Local cert/private key material
 certs/**/*
 !certs/**/.gitkeep
+docker/certs/**/*
+!docker/certs/**/.gitkeep
 *.key
 *.pfx
+*.pem
+*.crt
+*.cer
+
+# Logs
+*.log
+yarn-error.log*
+npm-debug.log*
 
 # Temporary local-only mail relay test files (contains hardcoded infra/recipients)
 src/lib/server/mail/notifications.ts
