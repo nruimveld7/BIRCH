@@ -2,10 +2,10 @@
 	import { createEventDispatcher, onDestroy, onMount, tick } from 'svelte';
 	import ThemedCheckbox from '$lib/components/ThemedCheckbox.svelte';
 
-	type ScheduleRole = 'Member' | 'Maintainer' | 'Manager';
+	type ChartRole = 'Member' | 'Maintainer' | 'Manager';
 	type OnboardingSlide = {
 		id: string;
-		role: ScheduleRole;
+		role: ChartRole;
 		roleTier: number;
 		title: string;
 		description: string;

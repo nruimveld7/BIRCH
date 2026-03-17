@@ -5,59 +5,64 @@
 	import ConfirmDialog, { type ConfirmDialogOption } from '$lib/components/ConfirmDialog.svelte';
 	import ThemeToggle from '$lib/components/ThemeToggle.svelte';
 	import ColorPicker from '$lib/components/ColorPicker.svelte';
+	import HorizontalScrollArea from '$lib/components/HorizontalScrollArea.svelte';
 	import { fetchWithAuthRedirect as fetchWithAuthRedirectUtil } from '$lib/utils/fetchWithAuthRedirect';
 
-	type ScheduleRole = 'Member' | 'Maintainer' | 'Manager';
-	type ScheduleMembership = {
-		ScheduleId: number;
+	type ChartRole = 'Member' | 'Maintainer' | 'Manager';
+	type ChartMembership = {
+		ChartId: number;
 		Name: string;
-		RoleName: ScheduleRole;
+		RoleName: ChartRole;
 		IsDefault: boolean;
 		IsActive: boolean;
 		ThemeJson?: string | null;
 		VersionAt?: string | null;
 	};
 	type ThemeMode = 'dark' | 'light';
-	type ThemeSection = 'page' | 'placeholder';
+	type ThemeSection = 'page' | 'canvas';
 	type ThemeFieldKey =
 		| 'background'
 		| 'text'
 		| 'accent'
-		| 'placeholderColor3'
-		| 'placeholderColor2'
-		| 'placeholderColor1'
 		| 'pageBorderColor'
-		| 'placeholderColor4'
 		| 'primaryGradient1'
 		| 'primaryGradient2'
 		| 'secondaryGradient1'
-		| 'secondaryGradient2';
+		| 'secondaryGradient2'
+		| 'canvasColor'
+		| 'canvasAccent'
+		| 'nodeBackground'
+		| 'nodeBorder'
+		| 'nodeConnections'
+		| 'nodeText'
+		| 'controlsBackground'
+		| 'controlsText';
 	type ThemeDraft = Record<ThemeFieldKey, string>;
 	type ThemeFieldOption = { key: ThemeFieldKey; label: string; section: ThemeSection };
 	type StatusTone = 'success' | 'error' | 'info';
 	type ManagerCustomizationState = {
-		scheduleName: string;
+		chartName: string;
 		isActive: boolean;
 		themes: Record<ThemeMode, ThemeDraft>;
 		versionAt: string | null;
 	};
-	type ScheduleStateMutationResponse = {
+	type ChartStateMutationResponse = {
 		ok?: boolean;
-		scheduleId?: number;
+		chartId?: number;
 		isActive?: boolean;
-		mode?: 'schedule_state_updated' | 'manager_removed' | 'schedule_deleted';
+		mode?: 'chart_state_updated' | 'manager_removed' | 'chart_deleted';
 		versionAt?: string | null;
 	};
-	type ScheduleStateConflictResponse = {
+	type ChartStateConflictResponse = {
 		code?: string;
-		action?: 'REMOVE_SELF' | 'DELETE_SCHEDULE';
+		action?: 'REMOVE_SELF' | 'DELETE_CHART';
 		managerCount?: number;
 		message?: string;
 	};
-	type ScheduleCustomizationMutationResponse = {
+	type ChartCustomizationMutationResponse = {
 		ok?: boolean;
-		scheduleId?: number;
-		scheduleName?: string;
+		chartId?: number;
+		chartName?: string;
 		isActive?: boolean;
 		theme?: Record<ThemeMode, ThemeDraft>;
 		versionAt?: string | null;
@@ -71,38 +76,38 @@
 	};
 
 	export let open = false;
-	export let activeScheduleId: number | null = null;
-	export let scheduleMemberships: ScheduleMembership[] = [];
+	export let activeChartId: number | null = null;
+	export let chartMemberships: ChartMembership[] = [];
 	export let currentThemeMode: ThemeMode = 'dark';
 	export let onThemeModeChange: (nextMode: ThemeMode) => void | Promise<void> = () => {};
 	export let onClose: () => void = () => {};
 	export let onMembershipsRefresh: (
-		memberships: ScheduleMembership[],
-		activeScheduleId: number | null
+		memberships: ChartMembership[],
+		activeChartId: number | null
 	) => void | Promise<void> = () => {};
-	let liveMemberships: ScheduleMembership[] = [];
+	let liveMemberships: ChartMembership[] = [];
 	let membershipsLoading = false;
 	let membershipsError = '';
 	let hasLiveMemberships = false;
 	let wasOpen = false;
 	let syncSelectionToCurrentOnRefresh = false;
-	let selectedScheduleId: number | null = null;
-	let currentScheduleId: number | null = null;
-	let selectedMembership: ScheduleMembership | null = null;
+	let selectedChartId: number | null = null;
+	let currentChartId: number | null = null;
+	let selectedMembership: ChartMembership | null = null;
 	let isSavingDefault = false;
-	let isSwitchingSchedule = false;
+	let isSwitchingChart = false;
 	let isSavingManagerDraft = false;
-	let isCreatingSchedule = false;
-	let isTogglingScheduleState = false;
-	let showCreateScheduleForm = false;
-	let newScheduleName = '';
+	let isCreatingChart = false;
+	let isTogglingChartState = false;
+	let showCreateChartForm = false;
+	let newChartName = '';
 	let actionError = '';
-	let effectiveMemberships: ScheduleMembership[] = [];
-	let resolvedCurrentScheduleId: number | null = null;
+	let effectiveMemberships: ChartMembership[] = [];
+	let resolvedCurrentChartId: number | null = null;
 	let isSelectedMembershipActive = false;
-	let canCreateSchedules = false;
-	let managerSavedByScheduleId: Record<number, ManagerCustomizationState> = {};
-	let managerDraftByScheduleId: Record<number, ManagerCustomizationState> = {};
+	let canCreateCharts = false;
+	let managerSavedByChartId: Record<number, ManagerCustomizationState> = {};
+	let managerDraftByChartId: Record<number, ManagerCustomizationState> = {};
 	let selectedManagerSaved: ManagerCustomizationState | null = null;
 	let selectedManagerDraft: ManagerCustomizationState | null = null;
 	let hasManagerThemeChanges = false;
@@ -135,10 +140,14 @@
 		{ key: 'primaryGradient2', label: 'Primary Gradient 2', section: 'page' },
 		{ key: 'secondaryGradient1', label: 'Secondary Gradient 1', section: 'page' },
 		{ key: 'secondaryGradient2', label: 'Secondary Gradient 2', section: 'page' },
-		{ key: 'placeholderColor1', label: 'Placeholder Color 1', section: 'placeholder' },
-		{ key: 'placeholderColor2', label: 'Placeholder Color 2', section: 'placeholder' },
-		{ key: 'placeholderColor3', label: 'Placeholder Color 3', section: 'placeholder' },
-		{ key: 'placeholderColor4', label: 'Placeholder Color 4', section: 'placeholder' }
+		{ key: 'canvasColor', label: 'Canvas', section: 'canvas' },
+		{ key: 'canvasAccent', label: 'Accent', section: 'canvas' },
+		{ key: 'nodeBackground', label: 'Node Background', section: 'canvas' },
+		{ key: 'nodeBorder', label: 'Node Border', section: 'canvas' },
+		{ key: 'nodeConnections', label: 'Node Connections', section: 'canvas' },
+		{ key: 'nodeText', label: 'Node Text', section: 'canvas' },
+		{ key: 'controlsBackground', label: 'Controls Background', section: 'canvas' },
+		{ key: 'controlsText', label: 'Controls Text', section: 'canvas' }
 	];
 	$: activeThemeFieldOptions = themeFieldOptions.filter(
 		(themeField) => themeField.section === selectedThemeSection
@@ -158,29 +167,37 @@
 			background: '#07080b',
 			text: '#ffffff',
 			accent: '#c8102e',
-			placeholderColor3: '#c8102e',
-			placeholderColor2: '#000000',
-			placeholderColor1: '#161a22',
 			pageBorderColor: '#292a30',
-			placeholderColor4: '#292a30',
 			primaryGradient1: '#7a1b2c',
 			primaryGradient2: '#2d1118',
 			secondaryGradient1: '#361219',
-			secondaryGradient2: '#0c0e12'
+			secondaryGradient2: '#0c0e12',
+			canvasColor: '#0b0d12',
+			canvasAccent: '#c8102e',
+			nodeBackground: '#161a22',
+			nodeBorder: '#292a30',
+			nodeConnections: '#c8102e',
+			nodeText: '#ffffff',
+			controlsBackground: '#161a22',
+			controlsText: '#ffffff'
 		},
 		light: {
 			background: '#f2f3f5',
 			text: '#000000',
 			accent: '#c8102e',
-			placeholderColor3: '#c8102e',
-			placeholderColor2: '#d4d7de',
-			placeholderColor1: '#f5f6f8',
 			pageBorderColor: '#bbbec6',
-			placeholderColor4: '#bbbec6',
 			primaryGradient1: '#f4d7dd',
 			primaryGradient2: '#f8f9fb',
 			secondaryGradient1: '#faeef0',
-			secondaryGradient2: '#f5f6f8'
+			secondaryGradient2: '#f5f6f8',
+			canvasColor: '#edf0f4',
+			canvasAccent: '#c8102e',
+			nodeBackground: '#f5f6f8',
+			nodeBorder: '#bbbec6',
+			nodeConnections: '#c8102e',
+			nodeText: '#000000',
+			controlsBackground: '#f5f6f8',
+			controlsText: '#000000'
 		}
 	};
 
@@ -200,6 +217,16 @@
 		'accent-1',
 		'accent-2',
 		'accent-3',
+		'canvas-background',
+		'canvas-accent',
+		'canvas-accent-1',
+		'canvas-accent-2',
+		'node-background',
+		'node-border',
+		'node-connection',
+		'node-text',
+		'controls-background',
+		'controls-text',
 		'placeholder-color-3',
 		'placeholder-color-3-strong',
 		'focus-ring',
@@ -246,18 +273,22 @@
 		background: '#07080b',
 		text: '#ffffff',
 		accent: '#c8102e',
-		placeholderColor3: '#c8102e',
-		placeholderColor2: '#000000',
-		placeholderColor1: '#161a22',
 		pageBorderColor: '#292a30',
-		placeholderColor4: '#292a30',
 		primaryGradient1: '#7a1b2c',
 		primaryGradient2: '#2d1118',
 		secondaryGradient1: '#361219',
-		secondaryGradient2: '#0c0e12'
+		secondaryGradient2: '#0c0e12',
+		canvasColor: '#0b0d12',
+		canvasAccent: '#c8102e',
+		nodeBackground: '#161a22',
+		nodeBorder: '#292a30',
+		nodeConnections: '#c8102e',
+		nodeText: '#ffffff',
+		controlsBackground: '#161a22',
+		controlsText: '#ffffff'
 	};
 
-	function normalizeScheduleId(value: unknown): number | null {
+	function normalizeChartId(value: unknown): number | null {
 		if (typeof value === 'number' && Number.isFinite(value)) {
 			return Number(value);
 		}
@@ -340,7 +371,7 @@
 
 	function cloneManagerState(state: ManagerCustomizationState): ManagerCustomizationState {
 		return {
-			scheduleName: state.scheduleName,
+			chartName: state.chartName,
 			isActive: state.isActive,
 			versionAt: state.versionAt,
 			themes: {
@@ -354,19 +385,99 @@
 		return themeFieldOptions.every((field) => a[field.key] === b[field.key]);
 	}
 
+	function parseLegacyModeTheme(
+		modeValue: Record<string, unknown>,
+		modeDefaults: ThemeDraft
+	): ThemeDraft {
+		const legacyAccent =
+			typeof modeValue.placeholder === 'string'
+				? modeValue.placeholder
+				: typeof modeValue.placeholderColor3 === 'string'
+					? modeValue.placeholderColor3
+					: modeDefaults.canvasAccent;
+		const legacyNodeBorder =
+			typeof modeValue.nodeBorder === 'string'
+				? modeValue.nodeBorder
+				: typeof modeValue.placeholderColor4 === 'string'
+					? modeValue.placeholderColor4
+					: typeof modeValue.pageBorderColor === 'string'
+						? modeValue.pageBorderColor
+						: modeDefaults.nodeBorder;
+
+		return {
+			background:
+				typeof modeValue.background === 'string'
+					? normalizeHexColor(modeValue.background, modeDefaults.background)
+					: modeDefaults.background,
+			text:
+				typeof modeValue.text === 'string'
+					? normalizeHexColor(modeValue.text, modeDefaults.text)
+					: modeDefaults.text,
+			accent:
+				typeof modeValue.accent === 'string'
+					? normalizeHexColor(modeValue.accent, modeDefaults.accent)
+					: modeDefaults.accent,
+			pageBorderColor:
+				typeof modeValue.pageBorderColor === 'string'
+					? normalizeHexColor(modeValue.pageBorderColor, modeDefaults.pageBorderColor)
+					: modeDefaults.pageBorderColor,
+			primaryGradient1:
+				typeof modeValue.primaryGradient1 === 'string'
+					? normalizeHexColor(modeValue.primaryGradient1, modeDefaults.primaryGradient1)
+					: modeDefaults.primaryGradient1,
+			primaryGradient2:
+				typeof modeValue.primaryGradient2 === 'string'
+					? normalizeHexColor(modeValue.primaryGradient2, modeDefaults.primaryGradient2)
+					: modeDefaults.primaryGradient2,
+			secondaryGradient1:
+				typeof modeValue.secondaryGradient1 === 'string'
+					? normalizeHexColor(modeValue.secondaryGradient1, modeDefaults.secondaryGradient1)
+					: modeDefaults.secondaryGradient1,
+			secondaryGradient2:
+				typeof modeValue.secondaryGradient2 === 'string'
+					? normalizeHexColor(modeValue.secondaryGradient2, modeDefaults.secondaryGradient2)
+					: modeDefaults.secondaryGradient2,
+			canvasColor:
+				typeof modeValue.canvasColor === 'string'
+					? normalizeHexColor(modeValue.canvasColor, modeDefaults.canvasColor)
+					: typeof modeValue.placeholderColor2 === 'string'
+						? normalizeHexColor(modeValue.placeholderColor2, modeDefaults.canvasColor)
+						: modeDefaults.canvasColor,
+			canvasAccent: normalizeHexColor(String(legacyAccent), modeDefaults.canvasAccent),
+			nodeBackground:
+				typeof modeValue.nodeBackground === 'string'
+					? normalizeHexColor(modeValue.nodeBackground, modeDefaults.nodeBackground)
+					: typeof modeValue.placeholderColor1 === 'string'
+						? normalizeHexColor(modeValue.placeholderColor1, modeDefaults.nodeBackground)
+						: modeDefaults.nodeBackground,
+			nodeBorder: normalizeHexColor(String(legacyNodeBorder), modeDefaults.nodeBorder),
+			nodeConnections:
+				typeof modeValue.nodeConnections === 'string'
+					? normalizeHexColor(modeValue.nodeConnections, modeDefaults.nodeConnections)
+					: normalizeHexColor(String(legacyAccent), modeDefaults.nodeConnections),
+			nodeText:
+				typeof modeValue.nodeText === 'string'
+					? normalizeHexColor(modeValue.nodeText, modeDefaults.nodeText)
+					: typeof modeValue.text === 'string'
+						? normalizeHexColor(modeValue.text, modeDefaults.nodeText)
+						: modeDefaults.nodeText,
+			controlsBackground:
+				typeof modeValue.controlsBackground === 'string'
+					? normalizeHexColor(modeValue.controlsBackground, modeDefaults.controlsBackground)
+					: modeDefaults.controlsBackground,
+			controlsText:
+				typeof modeValue.controlsText === 'string'
+					? normalizeHexColor(modeValue.controlsText, modeDefaults.controlsText)
+					: modeDefaults.controlsText
+		};
+	}
+
 	function buildModeOverrides(mode: ThemeMode, theme: ThemeDraft): Record<string, string> {
 		const defaults = themeDefaults[mode];
 		const background = normalizeHexColor(theme.background, defaults.background);
 		const text = normalizeHexColor(theme.text, defaults.text);
 		const accent = normalizeHexColor(theme.accent, defaults.accent);
-		const placeholderColor3 = normalizeHexColor(theme.placeholderColor3, defaults.placeholderColor3);
-		const placeholderColor2 = normalizeHexColor(theme.placeholderColor2, defaults.placeholderColor2);
-		const placeholderColor1 = normalizeHexColor(theme.placeholderColor1, defaults.placeholderColor1);
 		const pageBorderColor = normalizeHexColor(theme.pageBorderColor, defaults.pageBorderColor);
-		const placeholderColor4 = normalizeHexColor(
-			theme.placeholderColor4,
-			defaults.placeholderColor4
-		);
 		const headerGradientFrom = normalizeHexColor(theme.primaryGradient1, defaults.primaryGradient1);
 		const headerGradientTo = normalizeHexColor(theme.primaryGradient2, defaults.primaryGradient2);
 		const modalGradientFrom = normalizeHexColor(
@@ -382,10 +493,21 @@
 		const primaryGradientFrom = headerGradientFrom;
 		const primaryGradientTo = headerGradientTo;
 		const surface = mixColors(background, '#ffffff', mode === 'dark' ? 0.14 : 0.08);
+		const canvasBackground = normalizeHexColor(theme.canvasColor, defaults.canvasColor);
+		const canvasAccent = normalizeHexColor(theme.canvasAccent, defaults.canvasAccent);
+		const nodeBackground = normalizeHexColor(theme.nodeBackground, defaults.nodeBackground);
+		const nodeBorder = normalizeHexColor(theme.nodeBorder, defaults.nodeBorder);
+		const nodeConnections = normalizeHexColor(theme.nodeConnections, defaults.nodeConnections);
+		const nodeText = normalizeHexColor(theme.nodeText, defaults.nodeText);
+		const controlsBackground = normalizeHexColor(
+			theme.controlsBackground,
+			defaults.controlsBackground
+		);
+		const controlsText = normalizeHexColor(theme.controlsText, defaults.controlsText);
 		const border = pageBorderColor;
 		const isDark = mode === 'dark';
-		const headerGradientBottom = mixColors(placeholderColor1, '#000000', isDark ? 0.24 : 0.12);
-		const teamCellColor = mixColors(placeholderColor1, '#000000', isDark ? 0.32 : 0.16);
+		const headerGradientBottom = mixColors(nodeBackground, '#000000', isDark ? 0.24 : 0.12);
+		const teamCellColor = mixColors(nodeBackground, '#000000', isDark ? 0.32 : 0.16);
 
 		const bgWeight1 = isDark ? 0.08 : 0.06;
 		const bgWeight2 = isDark ? 0.15 : 0.12;
@@ -422,8 +544,18 @@
 			[`--theme-${mode}-accent-1`]: rgba(accent, 0.62),
 			[`--theme-${mode}-accent-2`]: rgba(accent, 0.3),
 			[`--theme-${mode}-accent-3`]: rgba(accent, 0.15),
-			[`--theme-${mode}-placeholder-color-3`]: rgba(placeholderColor3, todayAlpha),
-			[`--theme-${mode}-placeholder-color-3-strong`]: rgba(placeholderColor3, 0.33),
+			[`--theme-${mode}-canvas-background`]: canvasBackground,
+			[`--theme-${mode}-canvas-accent`]: canvasAccent,
+			[`--theme-${mode}-canvas-accent-1`]: rgba(canvasAccent, 0.62),
+			[`--theme-${mode}-canvas-accent-2`]: rgba(canvasAccent, 0.3),
+			[`--theme-${mode}-node-background`]: nodeBackground,
+			[`--theme-${mode}-node-border`]: nodeBorder,
+			[`--theme-${mode}-node-connection`]: nodeConnections,
+			[`--theme-${mode}-node-text`]: rgba(nodeText, textAlpha),
+			[`--theme-${mode}-controls-background`]: controlsBackground,
+			[`--theme-${mode}-controls-text`]: rgba(controlsText, textAlpha),
+			[`--theme-${mode}-placeholder-color-3`]: rgba(canvasAccent, todayAlpha),
+			[`--theme-${mode}-placeholder-color-3-strong`]: rgba(canvasAccent, 0.33),
 			[`--theme-${mode}-focus-ring`]: `0 0 0 3px ${rgba(accent, 0.22)}`,
 			[`--theme-${mode}-interactive-bg`]: isDark ? rgba('#ffffff', 0.06) : rgba('#ffffff', 0.72),
 			[`--theme-${mode}-interactive-bg-hover`]: isDark
@@ -433,8 +565,8 @@
 				? rgba('#ffffff', 0.14)
 				: rgba('#000000', 0.14),
 			[`--theme-${mode}-interactive-border-hover`]: rgba(accent, interactiveHoverAlpha),
-			[`--theme-${mode}-team-cell-hover`]: rgba(accent, 0.12),
-			[`--theme-${mode}-team-cell-active`]: rgba(accent, cellActiveAlpha),
+			[`--theme-${mode}-team-cell-hover`]: rgba(canvasAccent, 0.12),
+			[`--theme-${mode}-team-cell-active`]: rgba(canvasAccent, cellActiveAlpha),
 			[`--theme-${mode}-modal-backdrop`]: rgba('#000000', backdropAlpha),
 			[`--theme-${mode}-modal-border`]: isDark ? rgba(border, 0.38) : rgba(border, 0.3),
 			[`--theme-${mode}-panel-bg`]: rgba('#ffffff', panelAlpha),
@@ -452,10 +584,10 @@
 			[`--theme-${mode}-border-accent-medium`]: rgba(border, 0.42),
 			[`--theme-${mode}-border-accent-strong`]: rgba(border, 0.55),
 			[`--theme-${mode}-border-accent-focus`]: rgba(border, 0.72),
-			[`--theme-${mode}-placeholder-color-1`]: rgba(placeholderColor1, 1),
-			[`--theme-${mode}-placeholder-color-2`]: rgba(placeholderColor2, 1),
-			[`--theme-${mode}-placeholder-color-4`]: rgba(placeholderColor4, 1),
-			[`--theme-${mode}-table-header-gradient-start`]: rgba(placeholderColor1, 1),
+			[`--theme-${mode}-placeholder-color-1`]: rgba(nodeBackground, 1),
+			[`--theme-${mode}-placeholder-color-2`]: rgba(canvasBackground, 1),
+			[`--theme-${mode}-placeholder-color-4`]: rgba(nodeBorder, 1),
+			[`--theme-${mode}-table-header-gradient-start`]: rgba(nodeBackground, 1),
 			[`--theme-${mode}-table-header-gradient-end`]: rgba(headerGradientBottom, 1),
 			[`--theme-${mode}-table-team-cell-bg`]: rgba(teamCellColor, 1),
 			[`--theme-${mode}-gradient-header-start`]: headerGradientFrom,
@@ -487,21 +619,21 @@
 		}
 	}
 
-	function applyActiveScheduleThemeOrDefault() {
-		const activeId = resolvedCurrentScheduleId;
+	function applyActiveChartThemeOrDefault() {
+		const activeId = resolvedCurrentChartId;
 		if (activeId !== null) {
-			const saved = managerSavedByScheduleId[activeId];
+			const saved = managerSavedByChartId[activeId];
 			if (saved) {
 				applyThemeState(saved);
 				return;
 			}
 			const activeMembership =
-				effectiveMemberships.find((membership) => membership.ScheduleId === activeId) ?? null;
+				effectiveMemberships.find((membership) => membership.ChartId === activeId) ?? null;
 				if (activeMembership) {
 					const parsedThemes = parseThemeJsonText(activeMembership.ThemeJson);
 					if (parsedThemes) {
 						applyThemeState({
-							scheduleName: activeMembership.Name,
+							chartName: activeMembership.Name,
 							isActive: activeMembership.IsActive,
 							versionAt:
 								typeof activeMembership.VersionAt === 'string'
@@ -526,27 +658,8 @@
 		const light = candidate.light as Record<string, unknown> | undefined;
 		if (!dark || !light) return null;
 
-		const parseMode = (
-			modeValue: Record<string, unknown>,
-			modeDefaults: ThemeDraft
-		): ThemeDraft => {
-			const parsed = {} as ThemeDraft;
-			for (const option of themeFieldOptions) {
-				const raw =
-					modeValue[option.key] ??
-					((option.key === 'pageBorderColor' || option.key === 'placeholderColor4'
-						? modeValue.borderColor
-						: undefined) as unknown);
-				parsed[option.key] =
-					typeof raw === 'string'
-						? normalizeHexColor(raw, modeDefaults[option.key])
-						: modeDefaults[option.key];
-			}
-			return parsed;
-		};
-
-		const parsedDark = parseMode(dark, themeDefaults.dark);
-		const parsedLight = parseMode(light, themeDefaults.light);
+		const parsedDark = parseLegacyModeTheme(dark, themeDefaults.dark);
+		const parsedLight = parseLegacyModeTheme(light, themeDefaults.light);
 
 		return { dark: parsedDark, light: parsedLight };
 	}
@@ -562,14 +675,14 @@
 		}
 	}
 
-	function ensureManagerState(membership: ScheduleMembership) {
+	function ensureManagerState(membership: ChartMembership) {
 		if (membership.RoleName !== 'Manager') return;
-		const scheduleId = membership.ScheduleId;
-		if (managerSavedByScheduleId[scheduleId] && managerDraftByScheduleId[scheduleId]) return;
+		const chartId = membership.ChartId;
+		if (managerSavedByChartId[chartId] && managerDraftByChartId[chartId]) return;
 		const parsedThemes = parseThemeJsonText(membership.ThemeJson);
 
 		const seed: ManagerCustomizationState = {
-			scheduleName: membership.Name,
+			chartName: membership.Name,
 			isActive: membership.IsActive,
 			versionAt: typeof membership.VersionAt === 'string' ? membership.VersionAt : null,
 			themes: {
@@ -577,34 +690,34 @@
 				light: parsedThemes ? { ...parsedThemes.light } : { ...themeDefaults.light }
 			}
 		};
-		managerSavedByScheduleId = {
-			...managerSavedByScheduleId,
-			[scheduleId]: cloneManagerState(seed)
+		managerSavedByChartId = {
+			...managerSavedByChartId,
+			[chartId]: cloneManagerState(seed)
 		};
-		managerDraftByScheduleId = {
-			...managerDraftByScheduleId,
-			[scheduleId]: cloneManagerState(seed)
-		};
-	}
-
-	function updateManagerDraft(scheduleId: number, nextState: ManagerCustomizationState) {
-		managerDraftByScheduleId = {
-			...managerDraftByScheduleId,
-			[scheduleId]: cloneManagerState(nextState)
+		managerDraftByChartId = {
+			...managerDraftByChartId,
+			[chartId]: cloneManagerState(seed)
 		};
 	}
 
-	function displayScheduleName(membership: ScheduleMembership): string {
-		return managerSavedByScheduleId[membership.ScheduleId]?.scheduleName ?? membership.Name;
+	function updateManagerDraft(chartId: number, nextState: ManagerCustomizationState) {
+		managerDraftByChartId = {
+			...managerDraftByChartId,
+			[chartId]: cloneManagerState(nextState)
+		};
+	}
+
+	function displayChartName(membership: ChartMembership): string {
+		return managerSavedByChartId[membership.ChartId]?.chartName ?? membership.Name;
 	}
 
 	function handleManagerNameInput(event: Event) {
 		if (!selectedMembership || selectedMembership.RoleName !== 'Manager' || !selectedManagerDraft)
 			return;
 		const input = event.currentTarget as HTMLInputElement;
-		updateManagerDraft(selectedMembership.ScheduleId, {
+		updateManagerDraft(selectedMembership.ChartId, {
 			...selectedManagerDraft,
-			scheduleName: input.value
+			chartName: input.value
 		});
 		managerDraftStatusMessage = '';
 	}
@@ -623,26 +736,26 @@
 				}
 			}
 		};
-		updateManagerDraft(selectedMembership.ScheduleId, next);
+		updateManagerDraft(selectedMembership.ChartId, next);
 		applyThemeState(next);
 		managerDraftStatusMessage = '';
 	}
 
-	function resolveScheduleNameForSave(draftName: string, savedName: string): string {
+	function resolveChartNameForSave(draftName: string, savedName: string): string {
 		const trimmed = draftName.trim();
 		return trimmed || savedName;
 	}
 
 	async function postManagerCustomizationUpdate(
-		scheduleId: number,
+		chartId: number,
 		nextState: ManagerCustomizationState
-	): Promise<ScheduleCustomizationMutationResponse> {
-		const response = await fetchWithAuthRedirect(`${base}/api/hierarchies/customization`, {
+	): Promise<ChartCustomizationMutationResponse> {
+		const response = await fetchWithAuthRedirect(`${base}/api/charts/customization`, {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json', accept: 'application/json' },
 			body: JSON.stringify({
-				scheduleId,
-				scheduleName: nextState.scheduleName,
+				chartId,
+				chartName: nextState.chartName,
 				expectedVersionAt: nextState.versionAt,
 				theme: nextState.themes
 			})
@@ -655,11 +768,11 @@
 				const payload = (await response.json().catch(() => null)) as
 					| { code?: string; message?: string }
 					| null;
-				if (payload?.code === 'SCHEDULE_CONCURRENT_MODIFICATION') {
+				if (payload?.code === 'CHART_CONCURRENT_MODIFICATION') {
 					await refreshMemberships();
 					throw new Error(
 						payload.message?.trim() ||
-							'This hierarchy changed while you were editing. Review the latest values and retry.'
+							'This chart changed while you were editing. Review the latest values and retry.'
 					);
 				}
 			}
@@ -669,7 +782,7 @@
 			);
 			throw new Error(message);
 		}
-		return (await response.json()) as ScheduleCustomizationMutationResponse;
+		return (await response.json()) as ChartCustomizationMutationResponse;
 	}
 
 	async function parseErrorMessage(response: Response, fallback: string): Promise<string> {
@@ -702,7 +815,7 @@
 					? input.toString()
 					: input.url;
 		const parsedUrl = new URL(rawUrl, 'http://localhost');
-		if (!parsedUrl.pathname.startsWith('/api/hierarchies')) {
+		if (!parsedUrl.pathname.startsWith('/api/charts')) {
 			return fetchWithAuthRedirectUtil(input, init, base);
 		}
 
@@ -716,46 +829,39 @@
 			}
 		}
 
-		if (targetPath === '/api/hierarchies') {
-			targetPath = '/api/hierarchies';
+		if (targetPath === '/api/charts') {
+			targetPath = '/api/charts';
 			if (targetBody) {
-				targetBody = { hierarchyName: targetBody.scheduleName };
+				targetBody = { chartName: targetBody.chartName };
 			}
-		} else if (targetPath === '/api/hierarchies/memberships') {
-			targetPath = '/api/hierarchies/memberships';
-		} else if (targetPath === '/api/hierarchies/default') {
-			targetPath = '/api/hierarchies/default';
+		} else if (targetPath === '/api/charts/memberships') {
+			targetPath = '/api/charts/memberships';
+		} else if (targetPath === '/api/charts/default') {
+			targetPath = '/api/charts/default';
 			if (targetBody) {
-				targetBody = { hierarchyId: targetBody.scheduleId };
+				targetBody = { chartId: targetBody.chartId };
 			}
-		} else if (targetPath === '/api/hierarchies/active') {
-			targetPath = '/api/hierarchies/active';
+		} else if (targetPath === '/api/charts/active') {
+			targetPath = '/api/charts/active';
 			if (targetBody) {
-				targetBody = { hierarchyId: targetBody.scheduleId };
+				targetBody = { chartId: targetBody.chartId };
 			}
-		} else if (targetPath === '/api/hierarchies/state') {
-			targetPath = '/api/hierarchies/state';
+		} else if (targetPath === '/api/charts/state') {
+			targetPath = '/api/charts/state';
 			if (targetBody) {
 				targetBody = {
-					hierarchyId: targetBody.scheduleId,
-					isActive: targetBody.isActive
+					chartId: targetBody.chartId,
+					isActive: targetBody.isActive,
+					expectedVersionAt: targetBody.expectedVersionAt ?? null,
+					confirmDeactivation: targetBody.confirmDeactivation === true
 				};
 			}
-		} else if (targetPath === '/api/hierarchies/customization') {
-			targetPath = '/api/hierarchies/customization';
-			const themePayload = (targetBody?.theme ?? {}) as {
-				dark?: { accent?: string };
-				light?: { accent?: string };
-			};
-			const darkAccent = themePayload.dark?.accent ?? '#c8102e';
-			const lightAccent = themePayload.light?.accent ?? '#c8102e';
+		} else if (targetPath === '/api/charts/customization') {
+			targetPath = '/api/charts/customization';
 			targetBody = {
-				hierarchyId: targetBody?.scheduleId,
-				hierarchyName: targetBody?.scheduleName,
-				placeholderTheme: {
-					dark: { placeholder: darkAccent || '#c8102e' },
-					light: { placeholder: lightAccent || '#c8102e' }
-				}
+				chartId: targetBody?.chartId,
+				chartName: targetBody?.chartName,
+				placeholderTheme: targetBody?.theme
 			};
 		}
 
@@ -767,17 +873,17 @@
 		const response = await fetchWithAuthRedirectUtil(targetUrl, requestInit, base);
 		if (!response) return null;
 
-		if (parsedUrl.pathname === '/api/hierarchies/memberships') {
+		if (parsedUrl.pathname === '/api/charts/memberships') {
 			if (!response.ok) return response;
 			const payload = (await response.json()) as {
-				activeHierarchyId?: number | null;
+				activeChartId?: number | null;
 				memberships?: Array<Record<string, unknown>>;
 			};
 			return new Response(
 				JSON.stringify({
-					activeScheduleId: payload.activeHierarchyId ?? null,
+					activeChartId: payload.activeChartId ?? null,
 					memberships: (payload.memberships ?? []).map((membership) => ({
-						ScheduleId: Number(membership.HierarchyId ?? 0),
+						ChartId: Number(membership.ChartId ?? 0),
 						Name: String(membership.Name ?? ''),
 						RoleName: membership.RoleName,
 						IsDefault: Boolean(membership.IsDefault),
@@ -790,20 +896,21 @@
 			);
 		}
 
-		if (parsedUrl.pathname === '/api/hierarchies') {
+		if (parsedUrl.pathname === '/api/charts') {
 			if (!response.ok) return response;
-			const payload = (await response.json()) as { hierarchyId?: number };
+			const payload = (await response.json()) as { chartId?: number };
 			return new Response(
-				JSON.stringify({ scheduleId: payload.hierarchyId ?? null }),
+				JSON.stringify({ chartId: payload.chartId ?? null }),
 				{ status: response.status, headers: { 'content-type': 'application/json' } }
 			);
 		}
 
-		if (parsedUrl.pathname === '/api/hierarchies/customization') {
+		if (parsedUrl.pathname === '/api/charts/customization') {
 			if (!response.ok) return response;
 			const payload = (await response.json()) as {
-				hierarchyId?: number;
-				hierarchyName?: string;
+				chartId?: number;
+				chartName?: string;
+				versionAt?: string | null;
 				placeholderTheme?: {
 					dark?: { placeholder?: string };
 					light?: { placeholder?: string };
@@ -812,28 +919,40 @@
 			return new Response(
 				JSON.stringify({
 					ok: true,
-					scheduleId: payload.hierarchyId ?? null,
-					scheduleName: payload.hierarchyName ?? null,
+					chartId: payload.chartId ?? null,
+					chartName: payload.chartName ?? null,
 					isActive: true,
 					theme: {
 						dark: { accent: payload.placeholderTheme?.dark?.placeholder ?? '#c8102e' },
 						light: { accent: payload.placeholderTheme?.light?.placeholder ?? '#c8102e' }
 					},
-					versionAt: null
+					versionAt:
+						typeof payload.versionAt === 'string' && payload.versionAt.trim()
+							? payload.versionAt
+							: null
 				}),
 				{ status: response.status, headers: { 'content-type': 'application/json' } }
 			);
 		}
 
-		if (parsedUrl.pathname === '/api/hierarchies/state') {
+		if (parsedUrl.pathname === '/api/charts/state') {
 			if (!response.ok) return response;
-			const payload = (await response.json()) as { hierarchyId?: number; isActive?: boolean };
+			const payload = (await response.json()) as {
+				chartId?: number;
+				isActive?: boolean;
+				mode?: 'chart_state_updated' | 'manager_removed' | 'chart_deleted';
+				versionAt?: string | null;
+			};
 			return new Response(
 				JSON.stringify({
 					ok: true,
-					scheduleId: payload.hierarchyId ?? null,
+					chartId: payload.chartId ?? null,
 					isActive: Boolean(payload.isActive),
-					mode: 'schedule_state_updated'
+					mode: payload.mode ?? 'chart_state_updated',
+					versionAt:
+						typeof payload.versionAt === 'string' && payload.versionAt.trim()
+							? payload.versionAt
+							: null
 				}),
 				{ status: response.status, headers: { 'content-type': 'application/json' } }
 			);
@@ -842,24 +961,24 @@
 		return response;
 	}
 
-	async function toggleManagerScheduleActive() {
+	async function toggleManagerChartActive() {
 		if (!selectedMembership || selectedMembership.RoleName !== 'Manager' || !selectedManagerDraft)
 			return;
-		if (isTogglingScheduleState) return;
-		isTogglingScheduleState = true;
+		if (isTogglingChartState) return;
+		isTogglingChartState = true;
 		actionError = '';
 		managerDraftStatusMessage = '';
 
-		const scheduleId = selectedMembership.ScheduleId;
+		const chartId = selectedMembership.ChartId;
 		const nextIsActive = !selectedManagerDraft.isActive;
 
 		try {
 			const sendStateChange = async (confirmDeactivation: boolean): Promise<Response | null> =>
-				fetchWithAuthRedirect(`${base}/api/hierarchies/state`, {
+				fetchWithAuthRedirect(`${base}/api/charts/state`, {
 					method: 'POST',
 					headers: { 'Content-Type': 'application/json', accept: 'application/json' },
 					body: JSON.stringify({
-						scheduleId,
+						chartId,
 						isActive: nextIsActive,
 						expectedVersionAt: selectedManagerSaved?.versionAt ?? null,
 						confirmDeactivation
@@ -870,27 +989,27 @@
 			if (!response) return;
 
 			if (!response.ok && response.status === 409) {
-				let conflict: ScheduleStateConflictResponse | null = null;
+				let conflict: ChartStateConflictResponse | null = null;
 				try {
-					conflict = (await response.json()) as ScheduleStateConflictResponse;
+					conflict = (await response.json()) as ChartStateConflictResponse;
 				} catch {
 					conflict = null;
 				}
 
-				if (conflict?.code === 'SCHEDULE_CONCURRENT_MODIFICATION') {
+				if (conflict?.code === 'CHART_CONCURRENT_MODIFICATION') {
 					await refreshMemberships();
 					throw new Error(
 						conflict.message?.trim() ||
-							'This hierarchy changed while you were editing. Review the latest values and retry.'
+							'This chart changed while you were editing. Review the latest values and retry.'
 					);
 				}
 
-				if (!nextIsActive && conflict?.code === 'SCHEDULE_DEACTIVATION_CONFIRMATION_REQUIRED') {
+				if (!nextIsActive && conflict?.code === 'CHART_DEACTIVATION_CONFIRMATION_REQUIRED') {
 					const promptMessage =
 						typeof conflict.message === 'string' && conflict.message.trim()
 							? conflict.message
-							: conflict.action === 'DELETE_SCHEDULE'
-								? 'You are the last Manager for this hierarchy. If you continue, the hierarchy and all related data will be permanently deleted. Continue?'
+							: conflict.action === 'DELETE_CHART'
+								? 'You are the last Manager for this chart. If you continue, the chart and all related data will be permanently deleted. Continue?'
 								: 'This user is currently assigned to active shifts. If you continue, active assignments will end effective today and future assignments will be removed. Continue?';
 					const confirmChoice = await openConfirmDialog({
 						title: 'Confirm Deactivation',
@@ -912,20 +1031,20 @@
 			if (!response.ok) {
 				const message = await parseErrorMessage(
 					response,
-					`Failed to update hierarchy state (${response.status})`
+					`Failed to update chart state (${response.status})`
 				);
 				throw new Error(message);
 			}
 
-			const payload = (await response.json()) as ScheduleStateMutationResponse;
-			if (payload.mode === 'manager_removed' || payload.mode === 'schedule_deleted') {
+			const payload = (await response.json()) as ChartStateMutationResponse;
+			if (payload.mode === 'manager_removed' || payload.mode === 'chart_deleted') {
 				syncSelectionToCurrentOnRefresh = true;
 				await refreshMemberships();
 				await goto(`${base}/`, { invalidateAll: true });
 				return;
 			}
 
-			updateManagerDraft(scheduleId, {
+			updateManagerDraft(chartId, {
 				...selectedManagerDraft,
 				isActive: nextIsActive,
 				versionAt:
@@ -933,11 +1052,11 @@
 						? payload.versionAt
 						: selectedManagerDraft.versionAt
 			});
-			const savedState = managerSavedByScheduleId[scheduleId];
+			const savedState = managerSavedByChartId[chartId];
 			if (savedState) {
-				managerSavedByScheduleId = {
-					...managerSavedByScheduleId,
-					[scheduleId]: {
+				managerSavedByChartId = {
+					...managerSavedByChartId,
+					[chartId]: {
 						...savedState,
 						isActive: nextIsActive,
 						versionAt:
@@ -950,9 +1069,9 @@
 			await refreshMemberships();
 		} catch (errorValue) {
 			actionError =
-				errorValue instanceof Error ? errorValue.message : 'Failed to update hierarchy state';
+				errorValue instanceof Error ? errorValue.message : 'Failed to update chart state';
 		} finally {
-			isTogglingScheduleState = false;
+			isTogglingChartState = false;
 		}
 	}
 
@@ -966,15 +1085,15 @@
 				light: { ...themeDefaults.light }
 			}
 		};
-		updateManagerDraft(selectedMembership.ScheduleId, next);
+		updateManagerDraft(selectedMembership.ChartId, next);
 		applyThemeState(next);
 	}
 
 	function handleManagerThemeRestoreSaved() {
 		if (!selectedMembership || selectedMembership.RoleName !== 'Manager' || !selectedManagerSaved)
 			return;
-		const scheduleId = selectedMembership.ScheduleId;
-		const draft = managerDraftByScheduleId[scheduleId];
+		const chartId = selectedMembership.ChartId;
+		const draft = managerDraftByChartId[chartId];
 		if (!draft) return;
 		const nextDraft: ManagerCustomizationState = {
 			...draft,
@@ -983,7 +1102,7 @@
 				light: { ...selectedManagerSaved.themes.light }
 			}
 		};
-		updateManagerDraft(scheduleId, nextDraft);
+		updateManagerDraft(chartId, nextDraft);
 		if (isSelectedMembershipActive) {
 			applyThemeState(nextDraft);
 		}
@@ -1014,14 +1133,14 @@
 			return;
 		}
 
-		const scheduleId = selectedMembership.ScheduleId;
-		const nextName = resolveScheduleNameForSave(
-			selectedManagerDraft.scheduleName,
-			selectedManagerSaved.scheduleName
+		const chartId = selectedMembership.ChartId;
+		const nextName = resolveChartNameForSave(
+			selectedManagerDraft.chartName,
+			selectedManagerSaved.chartName
 		);
 		const nextSaved: ManagerCustomizationState = {
 			...selectedManagerSaved,
-			scheduleName: nextName,
+			chartName: nextName,
 			themes: {
 				dark: { ...selectedManagerDraft.themes.dark },
 				light: { ...selectedManagerDraft.themes.light }
@@ -1031,7 +1150,7 @@
 		managerDraftStatusMessage = '';
 
 		try {
-			const payload = await postManagerCustomizationUpdate(scheduleId, nextSaved);
+			const payload = await postManagerCustomizationUpdate(chartId, nextSaved);
 			const nextVersionAt =
 				typeof payload.versionAt === 'string' && payload.versionAt.trim()
 					? payload.versionAt
@@ -1040,13 +1159,13 @@
 				...nextSaved,
 				versionAt: nextVersionAt
 			};
-			managerSavedByScheduleId = {
-				...managerSavedByScheduleId,
-				[scheduleId]: cloneManagerState(persistedState)
+			managerSavedByChartId = {
+				...managerSavedByChartId,
+				[chartId]: cloneManagerState(persistedState)
 			};
-			managerDraftByScheduleId = {
-				...managerDraftByScheduleId,
-				[scheduleId]: cloneManagerState(persistedState)
+			managerDraftByChartId = {
+				...managerDraftByChartId,
+				[chartId]: cloneManagerState(persistedState)
 			};
 			await refreshMemberships();
 			if (isSelectedMembershipActive) {
@@ -1118,7 +1237,7 @@
 		}
 	}
 
-	function scheduleRoleSuffix(role: ScheduleRole): string {
+	function chartRoleSuffix(role: ChartRole): string {
 		return role === 'Manager' ? ' (Manager)' : role === 'Maintainer' ? ' (Maintainer)' : '';
 	}
 
@@ -1224,17 +1343,17 @@
 		updateCustomScrollbar();
 	}
 
-	function handleSelectSchedule(scheduleId: number) {
-		selectedScheduleId = scheduleId;
-		showCreateScheduleForm = false;
+	function handleSelectChart(chartId: number) {
+		selectedChartId = chartId;
+		showCreateChartForm = false;
 		actionError = '';
 	}
 
-	function openCreateScheduleForm() {
-		if (isCreatingSchedule) return;
-		selectedScheduleId = null;
-		showCreateScheduleForm = true;
-		newScheduleName = '';
+	function openCreateChartForm() {
+		if (isCreatingChart) return;
+		selectedChartId = null;
+		showCreateChartForm = true;
+		newChartName = '';
 		actionError = '';
 		managerDraftStatusMessage = '';
 		if (typeof document !== 'undefined') {
@@ -1245,43 +1364,43 @@
 		}
 	}
 
-	async function handleCreateSchedule() {
-		if (isCreatingSchedule) return;
-		const scheduleName = newScheduleName.trim();
-		if (!scheduleName) return;
+	async function handleCreateChart() {
+		if (isCreatingChart) return;
+		const chartName = newChartName.trim();
+		if (!chartName) return;
 
-		isCreatingSchedule = true;
+		isCreatingChart = true;
 		actionError = '';
 
 		try {
-			const response = await fetchWithAuthRedirect(`${base}/api/hierarchies`, {
+			const response = await fetchWithAuthRedirect(`${base}/api/charts`, {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json', accept: 'application/json' },
-				body: JSON.stringify({ scheduleName })
+				body: JSON.stringify({ chartName })
 			});
 			if (!response) return;
 			if (!response.ok) {
 				const message = await parseErrorMessage(
 					response,
-					`Failed to create hierarchy (${response.status})`
+					`Failed to create chart (${response.status})`
 				);
 				throw new Error(message);
 			}
 
-			const data = (await response.json()) as { scheduleId?: number | null };
+			const data = (await response.json()) as { chartId?: number | null };
 			await refreshMemberships();
-			const newScheduleId = normalizeScheduleId(data.scheduleId);
-			if (newScheduleId !== null) {
-				currentScheduleId = newScheduleId;
-				selectedScheduleId = newScheduleId;
-				showCreateScheduleForm = false;
-				newScheduleName = '';
+			const newChartId = normalizeChartId(data.chartId);
+			if (newChartId !== null) {
+				currentChartId = newChartId;
+				selectedChartId = newChartId;
+				showCreateChartForm = false;
+				newChartName = '';
 			}
 			await goto(`${base}/`, { invalidateAll: true });
 		} catch (errorValue) {
-			actionError = errorValue instanceof Error ? errorValue.message : 'Failed to create hierarchy';
+			actionError = errorValue instanceof Error ? errorValue.message : 'Failed to create chart';
 		} finally {
-			isCreatingSchedule = false;
+			isCreatingChart = false;
 		}
 	}
 
@@ -1290,7 +1409,7 @@
 		membershipsError = '';
 
 		try {
-			const response = await fetchWithAuthRedirect(`${base}/api/hierarchies/memberships`, {
+			const response = await fetchWithAuthRedirect(`${base}/api/charts/memberships`, {
 				headers: { accept: 'application/json' }
 			});
 			if (!response) {
@@ -1300,36 +1419,36 @@
 			if (!response.ok) {
 				const message = await parseErrorMessage(
 					response,
-					`Failed to refresh hierarchy list (${response.status})`
+					`Failed to refresh chart list (${response.status})`
 				);
 				throw new Error(message);
 			}
 
 			const data = (await response.json()) as {
-				activeScheduleId?: number | null;
-				memberships?: ScheduleMembership[];
+				activeChartId?: number | null;
+				memberships?: ChartMembership[];
 			};
 			liveMemberships = Array.isArray(data.memberships)
 				? data.memberships.map((membership) => ({
 						...membership,
-						ScheduleId: Number(membership.ScheduleId),
+						ChartId: Number(membership.ChartId),
 						IsActive: Boolean(membership.IsActive),
 						ThemeJson: typeof membership.ThemeJson === 'string' ? membership.ThemeJson : null,
 						VersionAt: typeof membership.VersionAt === 'string' ? membership.VersionAt : null
 					}))
 				: [];
-			currentScheduleId = normalizeScheduleId(data.activeScheduleId) ?? currentScheduleId;
+			currentChartId = normalizeChartId(data.activeChartId) ?? currentChartId;
 			if (syncSelectionToCurrentOnRefresh) {
-				selectedScheduleId =
-					currentScheduleId ??
-					(liveMemberships.length > 0 ? liveMemberships[0].ScheduleId : selectedScheduleId);
+				selectedChartId =
+					currentChartId ??
+					(liveMemberships.length > 0 ? liveMemberships[0].ChartId : selectedChartId);
 				syncSelectionToCurrentOnRefresh = false;
 			}
-			await onMembershipsRefresh(liveMemberships, currentScheduleId);
+			await onMembershipsRefresh(liveMemberships, currentChartId);
 			hasLiveMemberships = true;
 		} catch (errorValue) {
 			membershipsError =
-				errorValue instanceof Error ? errorValue.message : 'Failed to refresh hierarchy list';
+				errorValue instanceof Error ? errorValue.message : 'Failed to refresh chart list';
 		} finally {
 			membershipsLoading = false;
 		}
@@ -1341,58 +1460,58 @@
 		actionError = '';
 
 		try {
-			const response = await fetchWithAuthRedirect(`${base}/api/hierarchies/default`, {
+			const response = await fetchWithAuthRedirect(`${base}/api/charts/default`, {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json', accept: 'application/json' },
-				body: JSON.stringify({ scheduleId: selectedMembership.ScheduleId })
+				body: JSON.stringify({ chartId: selectedMembership.ChartId })
 			});
 			if (!response) return;
 			if (!response.ok) {
 				const message = await parseErrorMessage(
 					response,
-					`Failed to save default hierarchy (${response.status})`
+					`Failed to save default chart (${response.status})`
 				);
 				throw new Error(message);
 			}
 			await refreshMemberships();
 		} catch (errorValue) {
 			actionError =
-				errorValue instanceof Error ? errorValue.message : 'Failed to save default hierarchy';
+				errorValue instanceof Error ? errorValue.message : 'Failed to save default chart';
 		} finally {
 			isSavingDefault = false;
 		}
 	}
 
-	async function handleViewSchedule() {
+	async function handleViewChart() {
 		if (
 			!selectedMembership ||
-			selectedMembership.ScheduleId === resolvedCurrentScheduleId ||
-			isSwitchingSchedule
+			selectedMembership.ChartId === resolvedCurrentChartId ||
+			isSwitchingChart
 		)
 			return;
-		isSwitchingSchedule = true;
+		isSwitchingChart = true;
 		actionError = '';
 
 		try {
-			const response = await fetchWithAuthRedirect(`${base}/api/hierarchies/active`, {
+			const response = await fetchWithAuthRedirect(`${base}/api/charts/active`, {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json', accept: 'application/json' },
-				body: JSON.stringify({ scheduleId: selectedMembership.ScheduleId })
+				body: JSON.stringify({ chartId: selectedMembership.ChartId })
 			});
 			if (!response) return;
 			if (!response.ok) {
 				const message = await parseErrorMessage(
 					response,
-					`Failed to switch hierarchy (${response.status})`
+					`Failed to switch chart (${response.status})`
 				);
 				throw new Error(message);
 			}
-			currentScheduleId = selectedMembership.ScheduleId;
+			currentChartId = selectedMembership.ChartId;
 			await goto(`${base}/`, { invalidateAll: true });
 		} catch (errorValue) {
-			actionError = errorValue instanceof Error ? errorValue.message : 'Failed to switch hierarchy';
+			actionError = errorValue instanceof Error ? errorValue.message : 'Failed to switch chart';
 		} finally {
-			isSwitchingSchedule = false;
+			isSwitchingChart = false;
 		}
 	}
 
@@ -1404,23 +1523,23 @@
 		? liveMemberships
 		: open && membershipsLoading
 			? []
-			: scheduleMemberships;
+			: chartMemberships;
 
-	$: resolvedCurrentScheduleId =
-		currentScheduleId ??
-		normalizeScheduleId(activeScheduleId) ??
-		(effectiveMemberships.length === 1 ? effectiveMemberships[0].ScheduleId : null);
+	$: resolvedCurrentChartId =
+		currentChartId ??
+		normalizeChartId(activeChartId) ??
+		(effectiveMemberships.length === 1 ? effectiveMemberships[0].ChartId : null);
 
 	$: selectedMembership =
-		(selectedScheduleId === null
+		(selectedChartId === null
 			? null
-			: effectiveMemberships.find((membership) => membership.ScheduleId === selectedScheduleId)) ??
+			: effectiveMemberships.find((membership) => membership.ChartId === selectedChartId)) ??
 		null;
 
 	$: isSelectedMembershipActive =
-		selectedMembership !== null && selectedMembership.ScheduleId === resolvedCurrentScheduleId;
+		selectedMembership !== null && selectedMembership.ChartId === resolvedCurrentChartId;
 
-	$: canCreateSchedules = effectiveMemberships.some(
+	$: canCreateCharts = effectiveMemberships.some(
 		(membership) => membership.RoleName === 'Manager'
 	);
 
@@ -1430,45 +1549,45 @@
 
 	$: selectedManagerSaved =
 		selectedMembership && selectedMembership.RoleName === 'Manager'
-			? (managerSavedByScheduleId[selectedMembership.ScheduleId] ?? null)
+			? (managerSavedByChartId[selectedMembership.ChartId] ?? null)
 			: null;
 
 	$: selectedManagerDraft =
 		selectedMembership && selectedMembership.RoleName === 'Manager'
-			? (managerDraftByScheduleId[selectedMembership.ScheduleId] ?? null)
+			? (managerDraftByChartId[selectedMembership.ChartId] ?? null)
 			: null;
 
 	$: if (
 		selectedMembership &&
 		selectedMembership.RoleName === 'Manager' &&
-		!isTogglingScheduleState
+		!isTogglingChartState
 	) {
-		const scheduleId = selectedMembership.ScheduleId;
+		const chartId = selectedMembership.ChartId;
 		const nextIsActive = selectedMembership.IsActive;
 		const nextVersionAt =
 			typeof selectedMembership.VersionAt === 'string' ? selectedMembership.VersionAt : null;
-		const savedState = managerSavedByScheduleId[scheduleId];
+		const savedState = managerSavedByChartId[chartId];
 		if (
 			savedState &&
 			(savedState.isActive !== nextIsActive || savedState.versionAt !== nextVersionAt)
 		) {
-			managerSavedByScheduleId = {
-				...managerSavedByScheduleId,
-				[scheduleId]: {
+			managerSavedByChartId = {
+				...managerSavedByChartId,
+				[chartId]: {
 					...savedState,
 					isActive: nextIsActive,
 					versionAt: nextVersionAt
 				}
 			};
 		}
-		const draftState = managerDraftByScheduleId[scheduleId];
+		const draftState = managerDraftByChartId[chartId];
 		if (
 			draftState &&
 			(draftState.isActive !== nextIsActive || draftState.versionAt !== nextVersionAt)
 		) {
-			managerDraftByScheduleId = {
-				...managerDraftByScheduleId,
-				[scheduleId]: {
+			managerDraftByChartId = {
+				...managerDraftByChartId,
+				[chartId]: {
 					...draftState,
 					isActive: nextIsActive,
 					versionAt: nextVersionAt
@@ -1491,16 +1610,16 @@
 
 	$: hasManagerDraftChanges =
 		selectedManagerSaved && selectedManagerDraft
-			? resolveScheduleNameForSave(
-					selectedManagerDraft.scheduleName,
-					selectedManagerSaved.scheduleName
-				) !== selectedManagerSaved.scheduleName || hasManagerThemeChanges
+			? resolveChartNameForSave(
+					selectedManagerDraft.chartName,
+					selectedManagerSaved.chartName
+				) !== selectedManagerSaved.chartName || hasManagerThemeChanges
 			: false;
 
 	$: {
 		const currentManagerSelectionId =
 			selectedMembership && selectedMembership.RoleName === 'Manager'
-				? selectedMembership.ScheduleId
+				? selectedMembership.ChartId
 				: null;
 		if (
 			currentManagerSelectionId !== null &&
@@ -1517,14 +1636,14 @@
 	$: if (open && !wasOpen) {
 		hasLiveMemberships = false;
 		liveMemberships = [];
-		currentScheduleId = normalizeScheduleId(activeScheduleId);
-		selectedScheduleId = normalizeScheduleId(activeScheduleId);
+		currentChartId = normalizeChartId(activeChartId);
+		selectedChartId = normalizeChartId(activeChartId);
 		selectedThemeMode = currentThemeMode;
 		selectedThemeSection = 'page';
 		managerThemesExpanded = false;
 		lastManagerSelectionId = null;
-		showCreateScheduleForm = false;
-		newScheduleName = '';
+		showCreateChartForm = false;
+		newChartName = '';
 		syncSelectionToCurrentOnRefresh = true;
 		actionError = '';
 		membershipsError = '';
@@ -1544,21 +1663,21 @@
 		) {
 			applyThemeState(selectedManagerDraft);
 		} else {
-			applyActiveScheduleThemeOrDefault();
+			applyActiveChartThemeOrDefault();
 		}
 	}
 
-	$: if (open && !showCreateScheduleForm && !selectedScheduleId && effectiveMemberships.length > 0) {
-		selectedScheduleId = resolvedCurrentScheduleId ?? effectiveMemberships[0].ScheduleId;
+	$: if (open && !showCreateChartForm && !selectedChartId && effectiveMemberships.length > 0) {
+		selectedChartId = resolvedCurrentChartId ?? effectiveMemberships[0].ChartId;
 	}
 
 	$: if (
 		open &&
-		selectedScheduleId !== null &&
+		selectedChartId !== null &&
 		effectiveMemberships.length > 0 &&
-		!effectiveMemberships.some((membership) => membership.ScheduleId === selectedScheduleId)
+		!effectiveMemberships.some((membership) => membership.ChartId === selectedChartId)
 	) {
-		selectedScheduleId = resolvedCurrentScheduleId ?? effectiveMemberships[0].ScheduleId;
+		selectedChartId = resolvedCurrentChartId ?? effectiveMemberships[0].ChartId;
 	}
 
 	$: wasOpen = open;
@@ -1566,15 +1685,15 @@
 	$: if (!open) {
 		syncSelectionToCurrentOnRefresh = false;
 		stopDragging();
-		applyActiveScheduleThemeOrDefault();
+		applyActiveChartThemeOrDefault();
 		managerDraftStatusMessage = '';
 	}
 
 	$: modalScrollSyncKey = open
 		? [
 				effectiveMemberships.length,
-				selectedScheduleId ?? '',
-				showCreateScheduleForm ? '1' : '0',
+				selectedChartId ?? '',
+				showCreateChartForm ? '1' : '0',
 				selectedThemeMode,
 				selectedThemeSection,
 				actionError,
@@ -1623,43 +1742,43 @@
 			class="teamSetupModal"
 			role="dialog"
 			aria-modal="true"
-			aria-labelledby="hierarchy-setup-title"
+			aria-labelledby="chart-setup-title"
 			bind:this={modalEl}
 		>
 			<div class="teamSetupModalScroll" bind:this={modalScrollEl} on:scroll={onModalScroll}>
 				<header class="teamSetupHeader">
 					<div>
-						<h2 id="hierarchy-setup-title">Hierarchies</h2>
+						<h2 id="chart-setup-title">Charts</h2>
 					</div>
 					<button class="btn" type="button" on:click={closeModal}>Close</button>
 				</header>
 
 				<div class="teamSetupBody">
-					<nav class="teamSetupNav" aria-label="Hierarchies">
+					<nav class="teamSetupNav" aria-label="Charts">
 						{#if membershipsLoading && effectiveMemberships.length === 0}
-							<div class="teamSetupNavBtn">Loading hierarchies...</div>
+							<div class="teamSetupNavBtn">Loading charts...</div>
 						{:else if effectiveMemberships.length === 0}
-							<div class="teamSetupNavBtn">No hierarchies found.</div>
+							<div class="teamSetupNavBtn">No charts found.</div>
 						{:else}
-							{#each effectiveMemberships as membership (membership.ScheduleId)}
+							{#each effectiveMemberships as membership (membership.ChartId)}
 								<button
 									type="button"
-									class={`teamSetupNavBtn${membership.ScheduleId === selectedScheduleId ? ' active' : ''}`}
-									aria-current={membership.ScheduleId === selectedScheduleId ? 'page' : undefined}
-									on:click={() => handleSelectSchedule(membership.ScheduleId)}
+									class={`teamSetupNavBtn${membership.ChartId === selectedChartId ? ' active' : ''}`}
+									aria-current={membership.ChartId === selectedChartId ? 'page' : undefined}
+									on:click={() => handleSelectChart(membership.ChartId)}
 								>
-									{displayScheduleName(membership)}{scheduleRoleSuffix(membership.RoleName)}
+									{displayChartName(membership)}{chartRoleSuffix(membership.RoleName)}
 								</button>
 							{/each}
 						{/if}
-						{#if canCreateSchedules}
+						{#if canCreateCharts}
 							<button
 								type="button"
-								class={`teamSetupNavCreateBtn${showCreateScheduleForm ? ' active' : ''}`}
-								on:click={openCreateScheduleForm}
-								disabled={isCreatingSchedule}
-								aria-label="Create a new hierarchy"
-								title="Create a new hierarchy"
+								class={`teamSetupNavCreateBtn${showCreateChartForm ? ' active' : ''}`}
+								on:click={openCreateChartForm}
+								disabled={isCreatingChart}
+								aria-label="Create a new chart"
+								title="Create a new chart"
 							>
 								<svg viewBox="0 0 24 24" aria-hidden="true">
 									<path d="M12 5v14M5 12h14" />
@@ -1673,38 +1792,38 @@
 							{#if membershipsError}
 								<p class="setupActionAlert" role="alert">{membershipsError}</p>
 							{/if}
-							{#if showCreateScheduleForm}
+							{#if showCreateChartForm}
 								<div class="setupCard managerCustomizationCard">
 									<form
 										class="setupGrid managerCustomizationGrid"
-										on:submit|preventDefault={handleCreateSchedule}
+										on:submit|preventDefault={handleCreateChart}
 									>
 										<label class="setupField">
-											<span class="setupFieldLabel">Hierarchy Name</span>
+											<span class="setupFieldLabel">Chart Name</span>
 											<input
 												class="input"
 												type="text"
 												maxlength="120"
-												bind:value={newScheduleName}
-												placeholder="Hierarchy name"
+												bind:value={newChartName}
+												placeholder="Chart name"
 											/>
 										</label>
 										<button
-											class="btn primary managerCreateScheduleBtn"
+											class="btn primary managerCreateChartBtn"
 											type="submit"
-											disabled={isCreatingSchedule || !newScheduleName.trim()}
+											disabled={isCreatingChart || !newChartName.trim()}
 										>
-											{isCreatingSchedule ? 'Creating...' : 'Create'}
+											{isCreatingChart ? 'Creating...' : 'Create'}
 										</button>
 									</form>
 								</div>
 							{:else if !selectedMembership}
-								<p class="setupCardHint">Select a hierarchy to view options.</p>
+								<p class="setupCardHint">Select a chart to view options.</p>
 							{:else}
 								<div class="setupGrid">
 									{#if selectedMembership.IsDefault}
 										<div class="readOnlyField">
-											<span>Default Hierarchy</span>
+											<span>Default Chart</span>
 										</div>
 									{:else}
 										<button
@@ -1719,16 +1838,16 @@
 
 									{#if isSelectedMembershipActive}
 										<div class="readOnlyField">
-											<span>Active Hierarchy</span>
+											<span>Active Chart</span>
 										</div>
 									{:else}
 										<button
 											type="button"
 											class="btn primary readOnlyFieldActionBtn"
-											on:click={handleViewSchedule}
-											disabled={isSwitchingSchedule}
+											on:click={handleViewChart}
+											disabled={isSwitchingChart}
 										>
-											{isSwitchingSchedule ? 'Switching...' : 'View'}
+											{isSwitchingChart ? 'Switching...' : 'View'}
 										</button>
 									{/if}
 								</div>
@@ -1737,23 +1856,23 @@
 									<div class="setupCard managerCustomizationCard">
 										<div class="setupGrid managerCustomizationGrid">
 											<label class="setupField">
-												<span class="setupFieldLabel">Hierarchy Name</span>
+												<span class="setupFieldLabel">Chart Name</span>
 												<input
 													class="input"
 													type="text"
 													maxlength="120"
-													value={selectedManagerDraft.scheduleName}
+													value={selectedManagerDraft.chartName}
 													on:input={handleManagerNameInput}
-													placeholder="Hierarchy name"
+													placeholder="Chart name"
 												/>
 											</label>
 											<button
-												class={`btn managerScheduleToggleBtn ${selectedManagerDraft.isActive ? 'managerScheduleToggleBtnDanger' : 'managerScheduleToggleBtnSuccess'}`}
+												class={`btn managerChartToggleBtn ${selectedManagerDraft.isActive ? 'managerChartToggleBtnDanger' : 'managerChartToggleBtnSuccess'}`}
 												type="button"
-												on:click={toggleManagerScheduleActive}
-												disabled={isTogglingScheduleState}
+												on:click={toggleManagerChartActive}
+												disabled={isTogglingChartState}
 											>
-												{isTogglingScheduleState
+												{isTogglingChartState
 													? 'Saving...'
 													: selectedManagerDraft.isActive
 														? 'Deactivate'
@@ -1797,11 +1916,11 @@
 																<button
 																	type="button"
 																	role="tab"
-																	class={`actionBtn btn${selectedThemeSection === 'placeholder' ? ' primary' : ''}`}
-																	aria-selected={selectedThemeSection === 'placeholder'}
-																	on:click={() => (selectedThemeSection = 'placeholder')}
+																	class={`actionBtn btn${selectedThemeSection === 'canvas' ? ' primary' : ''}`}
+																	aria-selected={selectedThemeSection === 'canvas'}
+																	on:click={() => (selectedThemeSection = 'canvas')}
 																>
-																	Placeholder
+																	Canvas
 																</button>
 																<div class="managerThemeQuickActions">
 																	<button
@@ -1831,62 +1950,64 @@
 															</div>
 
 															<div class="managerThemeTableWrap">
-																<table class="managerThemeTable">
-																	<thead>
-																		<tr>
-																			<th scope="col">Setting</th>
-																			<th scope="col">Color</th>
-																			<th scope="col">Setting</th>
-																			<th scope="col">Color</th>
-																		</tr>
-																	</thead>
-																	<tbody>
-																		{#each activeThemeFieldRows as themeRow}
+																<HorizontalScrollArea>
+																	<table class="managerThemeTable">
+																		<thead>
 																			<tr>
-																				<th scope="row">{themeRow[0].label}</th>
-																				<td class="managerThemeColorCell">
-																					<div class="managerThemeField">
-																						<ColorPicker
-																							id={`manager-theme-${themeRow[0].key}`}
-																							label={themeRow[0].label}
-																							value={selectedManagerDraft.themes[selectedThemeMode][
-																								themeRow[0].key
-																							]}
-																							on:change={(event) =>
-																								handleManagerThemeInput(
-																									themeRow[0].key,
-																									event.detail
-																								)}
-																						/>
-																					</div>
-																				</td>
-																				{#if themeRow[1]}
-																					<th scope="row" class="managerThemeSettingDivider">
-																						{themeRow[1].label}
-																					</th>
+																				<th scope="col">Setting</th>
+																				<th scope="col">Color</th>
+																				<th scope="col">Setting</th>
+																				<th scope="col">Color</th>
+																			</tr>
+																		</thead>
+																		<tbody>
+																			{#each activeThemeFieldRows as themeRow}
+																				<tr>
+																					<th scope="row">{themeRow[0].label}</th>
 																					<td class="managerThemeColorCell">
 																						<div class="managerThemeField">
 																							<ColorPicker
-																								id={`manager-theme-${themeRow[1].key}`}
-																								label={themeRow[1].label}
+																								id={`manager-theme-${themeRow[0].key}`}
+																								label={themeRow[0].label}
 																								value={selectedManagerDraft.themes[selectedThemeMode][
-																									themeRow[1].key
+																									themeRow[0].key
 																								]}
 																								on:change={(event) =>
 																									handleManagerThemeInput(
-																										themeRow[1].key,
+																										themeRow[0].key,
 																										event.detail
 																									)}
 																							/>
 																						</div>
 																					</td>
-																				{:else}
-																					<td colspan="2"></td>
-																				{/if}
-																			</tr>
-																		{/each}
-																	</tbody>
-																</table>
+																					{#if themeRow[1]}
+																						<th scope="row" class="managerThemeSettingDivider">
+																							{themeRow[1].label}
+																						</th>
+																						<td class="managerThemeColorCell">
+																							<div class="managerThemeField">
+																								<ColorPicker
+																									id={`manager-theme-${themeRow[1].key}`}
+																									label={themeRow[1].label}
+																									value={selectedManagerDraft.themes[selectedThemeMode][
+																										themeRow[1].key
+																									]}
+																									on:change={(event) =>
+																										handleManagerThemeInput(
+																											themeRow[1].key,
+																											event.detail
+																										)}
+																								/>
+																							</div>
+																						</td>
+																					{:else}
+																						<td colspan="2"></td>
+																					{/if}
+																				</tr>
+																			{/each}
+																		</tbody>
+																	</table>
+																</HorizontalScrollArea>
 															</div>
 														</div>
 													{/if}
@@ -1894,7 +2015,7 @@
 											</div>
 										{:else}
 											<p class="setupCardHint">
-												Switch to this hierarchy to edit its theme settings.
+												Switch to this chart to edit its theme settings.
 											</p>
 										{/if}
 
@@ -1905,7 +2026,7 @@
 												on:click={handleManagerSaveDraft}
 												disabled={!hasManagerDraftChanges || isSavingManagerDraft}
 												title={hasManagerDraftChanges
-													? 'Save hierarchy changes'
+													? 'Save chart changes'
 													: 'No changes have been made.'}
 											>
 												{isSavingManagerDraft ? 'Saving...' : 'Save'}

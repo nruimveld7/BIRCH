@@ -1,7 +1,0 @@
-Schedule Theme Colors
-
-Clicking the "Themes" button will expand the customizable themes menu.
-
-Use Schedule Theme settings to control the schedule grid and schedule-specific surfaces.
-These colors affect how schedule content is visually presented.
-Adjust values to preview and save to apply the updated schedule look.

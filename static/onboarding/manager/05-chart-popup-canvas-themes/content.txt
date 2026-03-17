@@ -1,0 +1,7 @@
+Chart Theme Colors
+
+Clicking the "Themes" button will expand the customizable themes menu.
+
+Use Canvas Theme settings to control the canvas grid and chart-specific surfaces.
+These colors affect how chart content is visually presented.
+Adjust values to preview and save to apply the updated chart look.

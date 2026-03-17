@@ -1,6 +1,0 @@
-Add/Edit Shifts UI
-Use these screens to create new shifts or modify existing shift details.
-
-Each shift has a name, an optional pattern for customized visuals, and a date range.
-
-Changes to a shift can be reviewed and adjusted as needed.

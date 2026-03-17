@@ -1,170 +1,145 @@
 # BIRCH - Agent Onboarding
 
 ## Purpose
-BIRCH (Business Identity, Roles, and Chain-of-command Hub) is a hierarchy-first internal application evolving into a personnel hierarchy platform.
+BIRCH is an internal chart and organization-chart application.
 
-Core goals:
-- Keep hierarchy-scoped access and settings in a database-first model.
-- Preserve backend-first authorization and role enforcement.
-- Deliver intuitive visualization tooling for non-technical users.
-- Support reusable components and composition links as the primary domain model.
+The current product surface is centered on:
+- Microsoft Entra sign-in and session-backed access control
+- chart membership and role management
+- chart switching, default selection, and manager customization
+- a visual org-chart canvas for arranging nodes and drawing connections
 
-## Product Direction (Target State)
-- Render clickable components in `2D`, `2.5D`, and `3D`.
-- Allow hierarchical drill-down until leaf components.
-- Support optional warehouse mapping via component `ItemNumber`.
-- Support both standalone component rendering and composited child rendering.
-- Provide a composite layout/keyframe editor for exploded-view animations.
+## Current Product State
+The current frontend is an organization-chart workspace, not a component/CAD application.
 
-Rendering decisions:
-- `PNG` is supported for 2D/2.5D visuals.
-- `STEP` is the authoring/source format for 3D.
-- For performance, STEP should be converted server-side into a browser runtime mesh format (glTF/GLB) and cached.
-- `2.5D` means 2D canvas composition with z-order and parallax.
+What exists today:
+- `/` renders a chart-aware org-chart canvas
+- users can switch charts and set a default chart
+- managers can create charts, rename them, toggle active state, and edit placeholder theme colors
+- maintainers and managers can open edit mode on the canvas
+- the active chart's users can be listed, searched through Microsoft Graph, added, and role-edited
+- onboarding slides are shown based on role tier
 
-Coloring decisions:
-- Whole-component tinting is required.
-- Composite mode must still include a component-owned visual portion that can be tinted.
-- Visible subcomponents render with their own tint values.
+Important current limitation:
+- node and connection editing in `src/routes/+page.svelte` is currently client-side UI state
+- there is no end-to-end database persistence yet for org-chart nodes, edges, node assignments, canvas layout, or pinned state
+
+## Current Domain Vocabulary
+Use the current frontend language:
+- `Chart`: an access-scoped org context
+- `Organization Chart`: the visual canvas on `/`
+- `Node`: a draggable chart card on the canvas
+- `Connection`: a directional line between node connectors
+- `Member`, `Maintainer`, `Manager`: fixed chart roles
+
+Avoid introducing unrelated domain terms such as component/composite/STEP unless the user explicitly reintroduces them.
+
+Note:
+- some frontend files still use legacy `chart*` variable names internally, especially in chart-management modals
+- treat those as naming debt, not as product terminology
 
 ## Stack and Runtime
-- Framework: `SvelteKit` + TypeScript.
-- Backend DB: Microsoft SQL Server (Docker container).
-- Auth: Microsoft Entra ID (OIDC + PKCE + certificate-based client assertion).
-- Session storage: SQL table `dbo.UserSessions`.
-- Reverse proxy: `nginx` in Docker compose.
+- Framework: `SvelteKit` + TypeScript
+- Database: Microsoft SQL Server
+- Auth: Microsoft Entra ID with server-side session storage
+- Session table: `dbo.UserSessions`
+- Reverse proxy/runtime: Docker + `nginx`
 
 ## Access Model
-Fixed role catalog (`dbo.Roles`):
-- `Member`: baseline read/interact access for assigned hierarchies.
-- `Maintainer`: full hierarchy/component editing (structure, assets, layout, keyframes, mappings, user management below manager level).
-- `Manager`: maintainer access + hierarchy governance actions.
+Fixed role catalog:
+- `Member`: view allowed charts and use the viewer shell
+- `Maintainer`: member access plus edit mode and chart user management below manager level
+- `Manager`: maintainer access plus chart governance actions
 
-Manager-only capabilities:
-- Set user permissions to `Manager`.
-- Change hierarchy theme colors.
-- Change hierarchy name.
-- Deactivate hierarchy.
-- Create new hierarchies.
+Manager-only behavior currently exposed by the UI/backend:
+- create new charts
+- assign the `Manager` role
+- rename a chart
+- change chart placeholder theme colors
+- activate/deactivate a chart
 
-Bootstrap model for first-time initialization:
-- Env var `BOOTSTRAP_MANAGER_OIDS` contains allowed OIDs.
-- Matching users are tracked in `dbo.BootstrapManagers`.
-- Bootstrap managers can access `/setup` when they have bootstrap rights and no hierarchy access yet.
+Bootstrap behavior:
+- `BOOTSTRAP_MANAGER_OIDS` grants first-time setup access
+- bootstrap managers without chart access are routed to `/setup`
 
 ## Current Route-Level Behavior
-Auth/guard logic is in `src/hooks.server.ts`.
+Auth gating lives in `src/hooks.server.ts`.
 
-Public paths:
+Public routes:
 - `/auth/login`
 - `/auth/callback`
 - `/auth/error`
 - `/favicon.ico`
 
-Special prefixes:
-- `/api/internal/jobs/*`: bypasses app-level auth guard (network-restricted by nginx/docker setup).
-- `/api/dev/*`: bypasses redirect gating checks, but still requires a valid session.
+Protected routes:
+- `/`
+- `/setup`
+- `/unauthorized`
+- all non-internal API routes
 
-Protected flow (non-dev API routes):
-- No valid session: redirect to `/auth/login`.
-- Bootstrap user with no hierarchy access: redirect to `/setup`.
-- User with no access: redirect to `/unauthorized`.
-- User with access visiting `/unauthorized`: redirect to `/`.
-- Non-bootstrap user visiting `/setup`: redirect to `/`.
+Current flow:
+- no session: redirect to `/auth/login`
+- bootstrap user with no chart access: redirect to `/setup`
+- authenticated user with no chart access: redirect to `/unauthorized`
+- authenticated user with chart access: land on `/`
 
-Primary routes:
-- `/`: viewer-first app shell + hierarchy switching/customization + tools modal.
-- `/setup`: bootstrap first-hierarchy creation.
-- `/unauthorized`: access-gated messaging page.
-- `/auth/login`, `/auth/callback`, `/auth/error`: Entra auth flow.
+## Frontend Behavior
+Primary page: `src/routes/+page.svelte`
 
-## Session and Identity
-Auth/session implementation: `src/lib/server/auth.ts`.
+Current canvas capabilities:
+- drag, rename, resize, pin, and delete nodes
+- create connector-to-connector links between nodes
+- assign selected users to a node via `UserSearchCombobox`
+- pan, zoom, momentum scroll, keyboard navigation, and camera focus
+- toggle edit mode based on role
 
-Important details:
-- Session cookie key: `app_session`.
-- Session records are stored in `dbo.UserSessions`.
-- `UserSessions` includes `ActiveHierarchyId` (current hierarchy context per session).
-- On login/session read, user profile is upserted into `dbo.Users`.
+Current persistence reality:
+- chart memberships, role context, onboarding state, and theme settings are backed by the server
+- node graph state is not yet loaded from or saved to the backend
 
-Per-session active hierarchy:
-- Read via `getActiveHierarchyId(...)`.
-- Updated via `setActiveHierarchyForSession(...)`.
+Chart management UI:
+- `src/lib/components/ChartsModal.svelte`
+- `src/lib/components/ChartToolsModal.svelte`
 
-Access-token usage:
-- Session access token is reused for Graph lookups (user search) in hierarchy user add flows.
+Onboarding UI:
+- `src/lib/components/OnboardingTourModal.svelte`
+- file-backed slide content under `static/onboarding`
 
-## Database Structure (Current)
-Schema source of truth: `db/schema.sql`.
+Theme behavior:
+- theme preference (`system` / `dark` / `light`) is stored in browser `localStorage`
+- manager-edited placeholder colors are stored server-side on the chart
 
-Primary domain tables:
-- `dbo.Users`
-- `dbo.Hierarchies`
-- `dbo.Roles`
-- `dbo.HierarchyUsers`
-- `dbo.Components`
-- `dbo.ComponentLinks`
+## Server/Data Model State
+The backend currently supports:
+- user/session storage
+- chart creation and activation
+- chart membership and role resolution
+- default chart selection
+- chart placeholder theme customization
+- onboarding acknowledgement by role tier
 
-Supporting tables:
-- `dbo.BootstrapManagers`
-- `dbo.UserSessions`
+The backend does not yet provide an org-chart persistence model for:
+- chart nodes
+- chart edges
+- per-node assigned users
+- canvas coordinates and dimensions
+- pinned node state
 
-Model highlights:
-- Soft-delete pattern via `IsActive`, `DeletedAt`, `DeletedBy` across core tables.
-- Hierarchy-scoped unique names for components (`UX_Components_Hierarchy_Name_Active`).
-- Active unique hierarchy names (`UX_Hierarchies_Name_Active`).
-- Role assignment uniqueness per hierarchy/user (`UX_HierarchyUsers_Hierarchy_User_Active`).
-- `ComponentLinks` supports reusable parent/child composition with:
-  - `InstanceCount` and `SortOrder`
-  - no self-reference check
-  - recursion-prevention trigger: `dbo.TR_ComponentLinks_PreventRecursion`
-
-Theme data:
-- `dbo.Hierarchies.PlaceholderThemeJson` stores the current placeholder theme payload and is JSON-constrained.
-
-Planned model extensions:
-- Per-component render mode (`Auto`, `Standalone`, `Composite`) and effective-mode resolution.
-- Component asset metadata for PNG and STEP source assets.
-- Converted 3D runtime artifact references (glTF/GLB) for fast browser rendering.
-- Per-child transform/layout records with full position/rotation/scale.
-- Keyframe records (cap at 4 per child for v1).
-- Optional component `ItemNumber` mapping for live warehouse lookup.
-
-## UX and Editing Direction
-- App should remain viewer-first and visually clean.
-- Editing actions should be non-intrusive and launched in explicit modals.
-- Composite mode should provide arrangement and keyframe editing in a dedicated editor modal.
-- Desktop-first UX; maintain reasonable responsiveness but mobile editing is not a v1 requirement.
-
-## Onboarding Model
-Onboarding content is file-backed in `static/onboarding` and served by role tier.
-
-Implementation:
-- Server helpers: `src/lib/server/onboarding.ts`
-- API:
-  - `GET /api/onboarding/slides`
-  - `PATCH /api/onboarding/role`
-
-Role tiers:
-- `Member` = 1
-- `Maintainer` = 2
-- `Manager` = 3
-
-`dbo.Users.OnboardingRole` tracks the highest acknowledged tier (0-3).
+Treat that gap as real when designing schema or APIs.
 
 ## Current API Surface
-Hierarchy selection/customization:
-- `POST /api/hierarchies`
-- `GET /api/hierarchies/memberships`
-- `POST /api/hierarchies/active`
-- `POST /api/hierarchies/default`
-- `POST /api/hierarchies/state`
-- `POST /api/hierarchies/customization`
+Chart management:
+- `POST /api/charts`
+- `GET /api/charts/memberships`
+- `POST /api/charts/active`
+- `POST /api/charts/default`
+- `POST /api/charts/state`
+- `POST /api/charts/customization`
 
-Hierarchy user management:
-- `GET /api/hierarchy/users`
-- `POST /api/hierarchy/users`
-- `PATCH /api/hierarchy/users/:userOid`
+Chart user management:
+- `GET /api/chart/users`
+- `POST /api/chart/users`
+- `PATCH /api/chart/users/:userOid`
 
 Onboarding:
 - `GET /api/onboarding/slides`
@@ -173,32 +148,36 @@ Onboarding:
 Internal jobs:
 - `POST /api/internal/jobs/scheduled-reminders`
 
-## First-Time Setup Behavior
-First-time setup implementation: `src/routes/setup/+page.server.ts`.
+## First-Time Setup
+Implementation:
+- `src/routes/setup/+page.svelte`
+- `src/routes/setup/+page.server.ts`
 
 Current behavior:
-- Bootstrap manager creates the first hierarchy by name.
-- New hierarchy gets default placeholder theme JSON.
-- Creator is auto-assigned `Manager` role in `dbo.HierarchyUsers`.
-- Creator's `DefaultHierarchyId` is set if null.
-- Session `ActiveHierarchyId` is set to the new hierarchy.
+- bootstrap manager creates the first chart by name
+- new chart gets a default placeholder theme payload
+- creator is assigned `Manager`
+- default chart and active session chart are set
 
-## Local Development Runbook
-Project layout assumptions:
-- Compose/scripts root is parent directory (`../` from this workspace).
-- App source root is this directory (`BIRCH`).
-
-Key scripts (from `../scripts`):
-- `StartDev.sh`
-- `StopDev.sh`
-- `SqlRun.sh`
-- `Status.sh`
-- `DevLogs.sh`
+## Local Development
+Project layout:
+- app root: this directory
+- compose/scripts root: parent directory
 
 Typical commands:
 ```bash
+yarn install
+yarn dev
+yarn check
+yarn lint
+yarn test:unit
+```
+
+Environment-specific scripts from the parent repo:
+```bash
 ../scripts/StartDev.sh
 ../scripts/StopDev.sh
+../scripts/Status.sh
 ```
 
 Apply schema:
@@ -206,13 +185,8 @@ Apply schema:
 /bin/bash -lc "set -a; source ../.env.dev; set +a; ../scripts/SqlRun.sh dev birch < db/schema.sql"
 ```
 
-Seed data:
-```bash
-/bin/bash -lc "set -a; source ../.env.dev; set +a; ../scripts/SqlRun.sh dev birch < db/seed.sql"
-```
-
-## Environment Variables (Operationally Important)
-Defined in compose/env files outside this directory:
+## Environment Variables
+Operationally important values are defined outside this directory and include:
 - `SA_PASSWORD`
 - `MSSQL_HOST`
 - `MSSQL_PORT`
@@ -228,21 +202,18 @@ Defined in compose/env files outside this directory:
 - `ENTRA_CLIENT_CERT_PUBLIC_CERT_PATH`
 - `APP_SESSION_SECRET`
 - `BOOTSTRAP_MANAGER_OIDS`
-- `DEV_CONSOLE_ALLOWED_OIDS` (optional, dev-only)
+- `DEV_CONSOLE_ALLOWED_OIDS`
 
-`BOOTSTRAP_MANAGER_OIDS` delimiter support:
-- comma, semicolon, or whitespace.
-
-## Agent Notes / Guardrails
-- Treat `db/schema.sql` as authoritative for data model changes.
-- Preserve soft-delete behavior unless explicitly instructed otherwise.
-- Keep access checks backend-driven; do not rely on frontend-only gating.
-- Use Entra OID (`UserOid`) as stable identity key; do not key identity by email.
-- Keep hierarchy access scoped via `HierarchyUsers` + role resolution logic.
-- Keep the primary UI viewer-first; place editing in explicit modal flows.
-- Preserve role boundaries: maintainer edits structure/components; manager handles hierarchy governance.
-- For 3D performance, prefer server-side STEP conversion + cached runtime artifacts over raw STEP rendering in browser.
+## Agent Guardrails
+- Base product descriptions on the current code, especially `src/routes/+page.svelte`, not on stale copied documentation
+- Treat `db/schema.sql` as the schema source of truth, but verify that it matches the actual product before extending it
+- Keep authorization backend-driven
+- Use Entra OID (`UserOid`) as the stable identity key
+- Keep chart scope explicit in any new persistence model
+- Preserve the current role boundaries in both UI and API behavior
+- When adding org-chart persistence, model the actual frontend concepts: nodes, connections, assignments, and layout
+- Do not describe the app as a component/composite/3D system unless the user explicitly changes direction
 
 ## Package Manager
-- In this environment, npm is not available for package operations.
-- Prefer yarn for install/check/lint/test workflows.
+- Prefer `yarn`
+- Do not assume `npm` is available for package-management workflows in this environment

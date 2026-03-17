@@ -1,7 +1,0 @@
-Team Setup Popup Overview
-Open Team Setup using the "Team" button on the main schedule view to access these maintainer tools.
-
-The Team Setup popup is the primary workspace for maintainer operations.
-
-From here, you can manage users, shifts, patterns, assignments, and event codes.
-

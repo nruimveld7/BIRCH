@@ -1,0 +1,5 @@
+Rename Chart
+
+When changing the name of a chart, the Save button will become available if the new name is valid.
+
+Saving the change will update the chart title shown across the app for users with access.

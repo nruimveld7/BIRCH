@@ -1,0 +1,8 @@
+Edit Hotkeys
+There are a few hotkeys to aid in keeping nodes aligned.
+
+The shift button can be held while moving a node to snap it to the background grid system.
+
+The ctrl button can be held while moving a node to snap it corresponding to another nearby node.
+
+The space button can be held while move a node to move every node that is connected to the moving node at once.

@@ -1,0 +1,4 @@
+Pinned Nodes
+If there are any pinned nodes, a list will be shown on the right of the canvas.
+
+Entries in the pinned nodes list can be clicked to quickly jump to the selected node.

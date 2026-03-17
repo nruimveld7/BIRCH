@@ -30,6 +30,17 @@
   --interactive-border: var(--theme-dark-interactive-border, rgba(255, 255, 255, .14));
   --interactive-border-hover: var(--theme-dark-interactive-border-hover, rgba(200, 16, 46, .50));
 
+  --canvas-background: var(--theme-dark-canvas-background, #0b0d12);
+  --canvas-accent: var(--theme-dark-canvas-accent, #c8102e);
+  --canvas-accent-1: var(--theme-dark-canvas-accent-1, rgba(200, 16, 46, .62));
+  --canvas-accent-2: var(--theme-dark-canvas-accent-2, rgba(200, 16, 46, .30));
+  --node-background: var(--theme-dark-node-background, #161a22);
+  --node-border: var(--theme-dark-node-border, #292a30);
+  --node-connection: var(--theme-dark-node-connection, #c8102e);
+  --node-text: var(--theme-dark-node-text, rgba(255, 255, 255, .92));
+  --controls-background: var(--theme-dark-controls-background, #161a22);
+  --controls-text: var(--theme-dark-controls-text, rgba(255, 255, 255, .92));
+
   --team-cell-hover: var(--theme-dark-team-cell-hover, rgba(200, 16, 46, .12));
   --team-cell-active: var(--theme-dark-team-cell-active, rgba(200, 16, 46, .18));
 
@@ -78,7 +89,7 @@
   --scrollbar-thumb-bg: var(--theme-dark-scrollbar-thumb-bg, rgba(200, 16, 46, .30));
   --scrollbar-thumb-bg-hover: var(--theme-dark-scrollbar-thumb-bg-hover, rgba(200, 16, 46, .42));
   --scrollbar-thumb-border: 1px solid rgba(0, 0, 0, .35);
-  --schedule-card-top-gap: 10px;
+  --chart-card-top-gap: 10px;
 }
 
 
@@ -119,6 +130,17 @@
   --interactive-bg-hover: var(--theme-light-interactive-bg-hover, rgba(255, 255, 255, .90));
   --interactive-border: var(--theme-light-interactive-border, rgba(0, 0, 0, .14));
   --interactive-border-hover: var(--theme-light-interactive-border-hover, rgba(200, 16, 46, .45));
+
+  --canvas-background: var(--theme-light-canvas-background, #edf0f4);
+  --canvas-accent: var(--theme-light-canvas-accent, #c8102e);
+  --canvas-accent-1: var(--theme-light-canvas-accent-1, rgba(200, 16, 46, .62));
+  --canvas-accent-2: var(--theme-light-canvas-accent-2, rgba(200, 16, 46, .30));
+  --node-background: var(--theme-light-node-background, #f5f6f8);
+  --node-border: var(--theme-light-node-border, #bbbec6);
+  --node-connection: var(--theme-light-node-connection, #c8102e);
+  --node-text: var(--theme-light-node-text, rgba(0, 0, 0, .86));
+  --controls-background: var(--theme-light-controls-background, #f5f6f8);
+  --controls-text: var(--theme-light-controls-text, rgba(0, 0, 0, .86));
 
   --team-cell-hover: var(--theme-light-team-cell-hover, rgba(200, 16, 46, .12));
   --team-cell-active: var(--theme-light-team-cell-active, rgba(200, 16, 46, .16));

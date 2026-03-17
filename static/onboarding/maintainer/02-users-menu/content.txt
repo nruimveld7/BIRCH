@@ -1,9 +1,0 @@
-Users Menu
-Use the Users menu to view current schedule users and their role access.
-
-Anyone on the Users list can view the schedule.
-
-The available Roles are:
-Member - View only
-Maintainer - Full control over scheduling
-Manager - Adds theming customization and renaming controls

@@ -1,0 +1,9 @@
+Users Menu
+Use the Users menu to view current chart users and their role access.
+
+Anyone on the Users list can view the chart.
+
+The available Roles are:
+Member - View only
+Maintainer - Full control over the chart
+Manager - Adds theming customization and renaming controls

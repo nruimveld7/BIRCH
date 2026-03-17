@@ -19,19 +19,19 @@
     <div class="badge">Access Pending</div>
     <h1>BIRCH</h1>
     {#if data.hasUsers}
-      <p>Your account doesn’t have access to any hierarchies yet.</p>
+      <p>Your account doesn’t have access to any charts yet.</p>
     {:else}
       <p>
         Your account doesn’t have access yet. A manager needs to complete the initial setup before
-        hierarchies can be viewed.
+        charts can be viewed.
       </p>
       <p class="note">
-        This page will become the hierarchy viewer once access is granted.
+        This page will become the chart viewer once access is granted.
       </p>
     {/if}
     <div class="divider"></div>
     <div class="hint">
-      If you believe this is an error, contact a hierarchy manager.
+      If you believe this is an error, contact a chart manager.
     </div>
     <a class="retry" href="/">Retry Access</a>
     {#if !data.hasUsers}

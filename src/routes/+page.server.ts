@@ -1,6 +1,7 @@
 import type { PageServerLoad } from './$types';
 import { GetPool } from '$lib/server/db';
-import { getActiveHierarchyId, setActiveHierarchyForSession } from '$lib/server/auth';
+import { getActiveChartId, setActiveChartForSession } from '$lib/server/auth';
+import { listEffectiveChartMemberships } from '$lib/server/chart-access';
 import {
 	getRoleTier,
 	loadOnboardingSlidesByTierRange,
@@ -8,25 +9,26 @@ import {
 	type OnboardingSlide
 } from '$lib/server/onboarding';
 
-type HierarchyRole = 'Member' | 'Maintainer' | 'Manager';
+type ChartRole = 'Member' | 'Maintainer' | 'Manager';
 
-type HierarchyMembership = {
-	HierarchyId: number;
+type ChartMembership = {
+	ChartId: number;
 	Name: string;
-	RoleName: HierarchyRole;
+	RoleName: ChartRole;
+	AccessRoleLabel?: ChartRole | 'Bootstrap';
 	IsDefault: boolean;
 	IsActive: boolean;
 	PlaceholderThemeJson: string | null;
-	VersionAt: string | Date;
+	VersionAt: string | null;
 };
 
 export const load: PageServerLoad = async ({ locals, cookies }) => {
 	const user = locals.user;
 	if (!user) {
 		return {
-			hierarchy: null,
+			chart: null,
 			userRole: null,
-			hierarchyMemberships: [] as HierarchyMembership[],
+			chartMemberships: [] as ChartMembership[],
 			currentUserOid: null,
 			onboarding: {
 				currentTier: 0,
@@ -36,97 +38,57 @@ export const load: PageServerLoad = async ({ locals, cookies }) => {
 		};
 	}
 
-	let hierarchyId = await getActiveHierarchyId(cookies);
+	let chartId = await getActiveChartId(cookies);
 	const pool = await GetPool();
 
 	const userSettingsResult = await pool
 		.request()
 		.input('userOid', user.id)
 		.query(
-			`SELECT TOP (1) DefaultHierarchyId, OnboardingRole
+			`SELECT TOP (1) DefaultChartId, OnboardingRole
 			 FROM dbo.Users
-			 WHERE UserOid = @userOid
-			   AND DeletedAt IS NULL;`
+			 WHERE UserOid = @userOid;`
 		);
 
-	const defaultHierarchyId =
-		(userSettingsResult.recordset?.[0]?.DefaultHierarchyId as number | null) ?? null;
+	const defaultChartId =
+		(userSettingsResult.recordset?.[0]?.DefaultChartId as number | null) ?? null;
 	const onboardingRole = toRoleTier(userSettingsResult.recordset?.[0]?.OnboardingRole);
 
-	const membershipsResult = await pool
-		.request()
-		.input('userOid', user.id)
-		.input('defaultHierarchyId', defaultHierarchyId)
-		.query(
-			`WITH RankedMemberships AS (
-				SELECT
-					hu.HierarchyId,
-					h.Name,
-					r.RoleName,
-					h.IsActive,
-					h.PlaceholderThemeJson,
-					COALESCE(h.UpdatedAt, h.CreatedAt) AS VersionAt,
-					CAST(CASE WHEN hu.HierarchyId = @defaultHierarchyId THEN 1 ELSE 0 END AS bit) AS IsDefault,
-					ROW_NUMBER() OVER (
-						PARTITION BY hu.HierarchyId
-						ORDER BY
-							CASE r.RoleName
-								WHEN 'Manager' THEN 3
-								WHEN 'Maintainer' THEN 2
-								WHEN 'Member' THEN 1
-								ELSE 0
-							END DESC,
-							hu.GrantedAt DESC
-					) AS RoleRank
-				FROM dbo.HierarchyUsers hu
-				INNER JOIN dbo.Hierarchies h
-					ON h.HierarchyId = hu.HierarchyId
-				INNER JOIN dbo.Roles r
-					ON r.RoleId = hu.RoleId
-				WHERE hu.UserOid = @userOid
-				  AND hu.DeletedAt IS NULL
-				  AND hu.IsActive = 1
-				  AND h.DeletedAt IS NULL
-				  AND (h.IsActive = 1 OR r.RoleName = 'Manager')
-			)
-			SELECT HierarchyId, Name, RoleName, IsDefault, IsActive, PlaceholderThemeJson, VersionAt
-			FROM RankedMemberships
-			WHERE RoleRank = 1
-			ORDER BY IsDefault DESC, Name;`
-		);
+	const chartMemberships = (await listEffectiveChartMemberships({
+		userOid: user.id,
+		defaultChartId
+	})) as ChartMembership[];
 
-	const hierarchyMemberships = (membershipsResult.recordset ?? []) as HierarchyMembership[];
-
-	if (hierarchyId && !hierarchyMemberships.some((membership) => membership.HierarchyId === hierarchyId)) {
-		hierarchyId = null;
+	if (chartId && !chartMemberships.some((membership) => membership.ChartId === chartId)) {
+		chartId = null;
 	}
 
-	if (!hierarchyId) {
-		hierarchyId = hierarchyMemberships[0]?.HierarchyId ?? null;
-		if (hierarchyId) {
-			await setActiveHierarchyForSession(cookies, hierarchyId);
+	if (!chartId) {
+		chartId = chartMemberships[0]?.ChartId ?? null;
+		if (chartId) {
+			await setActiveChartForSession(cookies, chartId);
 		}
 	}
 
 	const highestRoleTier = Math.max(
 		0,
-		...hierarchyMemberships.map((membership) => getRoleTier(membership.RoleName))
+		...chartMemberships.map((membership) => getRoleTier(membership.RoleName))
 	);
 	const onboardingSlides = await loadOnboardingSlidesByTierRange({
 		minExclusiveTier: onboardingRole,
 		maxInclusiveTier: highestRoleTier
 	});
 
-	const activeMembership = hierarchyMemberships.find(
-		(membership) => membership.HierarchyId === hierarchyId
+	const activeMembership = chartMemberships.find(
+		(membership) => membership.ChartId === chartId
 	);
 
 	return {
-		hierarchy: activeMembership
-			? { HierarchyId: activeMembership.HierarchyId, Name: activeMembership.Name }
+		chart: activeMembership
+			? { ChartId: activeMembership.ChartId, Name: activeMembership.Name }
 			: null,
 		userRole: activeMembership?.RoleName ?? null,
-		hierarchyMemberships,
+		chartMemberships,
 		currentUserOid: user.id,
 		onboarding: {
 			currentTier: onboardingRole,

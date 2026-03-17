@@ -11,10 +11,10 @@ This spec defines Team Setup > Assignments behavior for:
 - Assignment row ordering
 - Assignment removal
 
-This spec is schedule-scoped.
+This spec is chart-scoped.
 
 ## Definitions
-- **Assignment entry**: effective-dated row in `dbo.ScheduleUserTypes`.
+- **Assignment entry**: effective-dated row in `dbo.ChartUserTypes`.
 - **Main assignment row**: the row rendered in the Assignments main table for the selected shift and month window.
 - **Assignment change row**: a historical effective-dated row shown in the expandable changes table.
 - **Active for month**: an assignment overlaps the selected month range where `StartDate <= monthEnd` and `(EndDate IS NULL OR EndDate >= monthStart)`.

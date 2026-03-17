@@ -1,0 +1,8 @@
+Chart Navigation
+To navigate a chart, the controls in the top right corner can be used.
+
+To zoom: use the magnifying glass buttons or use the scrollwheel on your mouse.
+
+To pan: use the arrow buttons or use the mouse pointer to click and drag around the canvas.
+
+The home button will return you to the center of the canvas.

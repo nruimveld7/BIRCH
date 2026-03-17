@@ -1,25 +1,25 @@
 <svelte:head>
-  <title>BIRCH — First Time Setup</title>
-  <meta name="description" content="Create the first hierarchy to get started." />
+  <title>Organization Chart — First Time Setup</title>
+  <meta name="description" content="Create the first chart to get started." />
 </svelte:head>
 
 <main class="gate">
   <section class="panel">
     <div class="badge">First Time Setup</div>
-    <h1>BIRCH</h1>
+    <h1>Organization Chart</h1>
     <p>
-      You’re signed in as a bootstrap manager. Create the first hierarchy to begin building the
+      You’re signed in as a bootstrap manager. Create the first chart to begin building the
       system.
     </p>
     <form method="post" class="form">
       <label>
-        Hierarchy name
+        Chart name
         <input name="name" type="text" placeholder="e.g. Primary Operations" required />
       </label>
-      <button type="submit">Create Hierarchy</button>
+      <button type="submit">Create Chart</button>
     </form>
     <div class="note">
-      After creation, you will be assigned as the hierarchy manager automatically.
+      After creation, your bootstrap manager access will apply automatically.
     </div>
   </section>
 </main>

@@ -1,8 +1,0 @@
-Add/Edit Event Codes UI
-Use these screens to create and edit event codes.
-
-Update code name, display text, and style properties so events remain clear and consistent.
-
-Add scheduled reminder defaults so that these don't need to be applied each time an event is created.
-
-Deactivate outdated event codes to prevent them from cluttering the interface for applying events to schedules.

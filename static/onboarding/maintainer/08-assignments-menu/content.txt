@@ -1,6 +1,0 @@
-Assignments Menu
-Use the Assignments menu to manage who is assigned to each shift.
-
-Once a month is selected, the Shift dropdown will populate with any available shifts during that month.
-
-Once a valid shift is selected, assignments for that shift during the selected month are able to be managed.

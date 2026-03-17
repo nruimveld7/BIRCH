@@ -415,13 +415,13 @@ async function ensureSessionTable() {
 async function ensureUsersTableExtensions() {
 	const pool = await GetPool();
 	await pool.request().query(`
-		IF COL_LENGTH('dbo.Users', 'DefaultHierarchyId') IS NULL
+		IF COL_LENGTH('dbo.Users', 'DefaultChartId') IS NULL
 		BEGIN
-			ALTER TABLE dbo.Users ADD DefaultHierarchyId int NULL;
+			ALTER TABLE dbo.Users ADD DefaultChartId int NULL;
 		END
-		IF COL_LENGTH('dbo.Users', 'HierarchyUiStateJson') IS NULL
+		IF COL_LENGTH('dbo.Users', 'ChartUiStateJson') IS NULL
 		BEGIN
-			ALTER TABLE dbo.Users ADD HierarchyUiStateJson nvarchar(max) NULL;
+			ALTER TABLE dbo.Users ADD ChartUiStateJson nvarchar(max) NULL;
 		END
 		IF COL_LENGTH('dbo.Users', 'OnboardingRole') IS NULL
 		BEGIN
@@ -466,42 +466,42 @@ async function ensureUsersTableExtensions() {
 				ADD CONSTRAINT CK_Users_OnboardingRole_Valid CHECK (OnboardingRole BETWEEN 0 AND 3);
 			');
 		END
-		IF COL_LENGTH('dbo.Users', 'HierarchyUiStateJson') IS NOT NULL
+		IF COL_LENGTH('dbo.Users', 'ChartUiStateJson') IS NOT NULL
 		BEGIN
 			EXEC(N'
 				UPDATE dbo.Users
-				   SET HierarchyUiStateJson = NULL
-				 WHERE HierarchyUiStateJson IS NOT NULL
-				   AND ISJSON(HierarchyUiStateJson) <> 1;
+				   SET ChartUiStateJson = NULL
+				 WHERE ChartUiStateJson IS NOT NULL
+				   AND ISJSON(ChartUiStateJson) <> 1;
 			');
 		END
-		IF OBJECT_ID('dbo.CK_Users_HierarchyUiStateJson_IsJson', 'C') IS NULL
+		IF OBJECT_ID('dbo.CK_Users_ChartUiStateJson_IsJson', 'C') IS NULL
 		BEGIN
 			EXEC(N'
 				ALTER TABLE dbo.Users
-				ADD CONSTRAINT CK_Users_HierarchyUiStateJson_IsJson
-				CHECK (HierarchyUiStateJson IS NULL OR ISJSON(HierarchyUiStateJson) = 1);
+				ADD CONSTRAINT CK_Users_ChartUiStateJson_IsJson
+				CHECK (ChartUiStateJson IS NULL OR ISJSON(ChartUiStateJson) = 1);
 			');
 		END
 		IF NOT EXISTS (
 			SELECT 1
 			FROM sys.foreign_keys
-			WHERE name = 'FK_Users_DefaultHierarchy'
+			WHERE name = 'FK_Users_DefaultChart'
 			  AND parent_object_id = OBJECT_ID('dbo.Users')
 		)
-		AND OBJECT_ID('dbo.Hierarchies', 'U') IS NOT NULL
+		AND OBJECT_ID('dbo.Charts', 'U') IS NOT NULL
 		BEGIN
 			ALTER TABLE dbo.Users WITH CHECK
-			ADD CONSTRAINT FK_Users_DefaultHierarchy FOREIGN KEY (DefaultHierarchyId) REFERENCES dbo.Hierarchies(HierarchyId);
+			ADD CONSTRAINT FK_Users_DefaultChart FOREIGN KEY (DefaultChartId) REFERENCES dbo.Charts(ChartId);
 		END
 		IF NOT EXISTS (
 			SELECT 1
 			FROM sys.indexes
-			WHERE name = 'IX_Users_DefaultHierarchyId'
+			WHERE name = 'IX_Users_DefaultChartId'
 			  AND object_id = OBJECT_ID('dbo.Users')
 		)
 		BEGIN
-			CREATE INDEX IX_Users_DefaultHierarchyId ON dbo.Users(DefaultHierarchyId);
+			CREATE INDEX IX_Users_DefaultChartId ON dbo.Users(DefaultChartId);
 		END
 	`);
 }
@@ -815,7 +815,7 @@ export async function getSessionAccessTokenByCookie(
 	return row.AccessToken;
 }
 
-export async function getActiveHierarchyId(
+export async function getActiveChartId(
 	cookies: RequestEvent['cookies']
 ): Promise<number | null> {
 	const token = cookies.get(SESSION_COOKIE);
@@ -826,17 +826,17 @@ export async function getActiveHierarchyId(
 		.request()
 		.input('sessionId', token)
 		.query(
-			`SELECT TOP (1) ActiveHierarchyId
+			`SELECT TOP (1) ActiveChartId
 			 FROM dbo.UserSessions
 			 WHERE SessionId = @sessionId;`
 		);
 	const row = result.recordset?.[0];
-	return row?.ActiveHierarchyId ?? null;
+	return row?.ActiveChartId ?? null;
 }
 
-export async function setActiveHierarchyForSession(
+export async function setActiveChartForSession(
 	cookies: RequestEvent['cookies'],
-	hierarchyId: number
+	chartId: number
 ): Promise<void> {
 	const token = cookies.get(SESSION_COOKIE);
 	if (!token) return;
@@ -845,10 +845,10 @@ export async function setActiveHierarchyForSession(
 	await pool
 		.request()
 		.input('sessionId', token)
-		.input('hierarchyId', hierarchyId)
+		.input('chartId', chartId)
 		.query(
 			`UPDATE dbo.UserSessions
-			 SET ActiveHierarchyId = @hierarchyId
+			 SET ActiveChartId = @chartId
 			 WHERE SessionId = @sessionId;`
 		);
 }

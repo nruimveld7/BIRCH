@@ -1,9 +1,9 @@
 import { GetPool } from '$lib/server/db';
 
 export type AccessState = {
-	hasHierarchies: boolean;
-	hasHierarchyUsers: boolean;
-	hasHierarchyAccess: boolean;
+	hasCharts: boolean;
+	hasChartUsers: boolean;
+	hasChartAccess: boolean;
 	isBootstrap: boolean;
 	hasAccess: boolean;
 };
@@ -16,9 +16,9 @@ export async function getAccessState(userOid: string): Promise<AccessState> {
 		.query(
 			`
 			DECLARE @hasBootstrap bit = 0;
-			DECLARE @hasHierarchyAccess bit = 0;
-			DECLARE @hasHierarchies bit = 0;
-			DECLARE @hasHierarchyUsers bit = 0;
+			DECLARE @hasChartAccess bit = 0;
+			DECLARE @hasCharts bit = 0;
+			DECLARE @hasChartUsers bit = 0;
 
 			IF OBJECT_ID('dbo.BootstrapManagers', 'U') IS NOT NULL
 			BEGIN
@@ -31,55 +31,51 @@ export async function getAccessState(userOid: string): Promise<AccessState> {
 				END
 			END
 
-			IF OBJECT_ID('dbo.HierarchyUsers', 'U') IS NOT NULL
+			IF OBJECT_ID('dbo.ChartUsers', 'U') IS NOT NULL
 			BEGIN
 				IF EXISTS (
-					SELECT 1 FROM dbo.HierarchyUsers
-					WHERE DeletedAt IS NULL AND IsActive = 1
+					SELECT 1 FROM dbo.ChartUsers
 				)
 				BEGIN
-					SET @hasHierarchyUsers = 1;
+					SET @hasChartUsers = 1;
 				END
 
 				IF EXISTS (
 					SELECT 1
-					FROM dbo.HierarchyUsers hu
-					INNER JOIN dbo.Hierarchies h
-						ON h.HierarchyId = hu.HierarchyId
+					FROM dbo.ChartUsers hu
+					INNER JOIN dbo.Charts h
+						ON h.ChartId = hu.ChartId
 					LEFT JOIN dbo.Roles r
 						ON r.RoleId = hu.RoleId
 					WHERE hu.UserOid = @userOid
-					  AND hu.DeletedAt IS NULL
-					  AND hu.IsActive = 1
-					  AND h.DeletedAt IS NULL
 					  AND (h.IsActive = 1 OR r.RoleName = 'Manager')
 				)
 				BEGIN
-					SET @hasHierarchyAccess = 1;
+					SET @hasChartAccess = 1;
 				END
 			END
 
-			IF OBJECT_ID('dbo.Hierarchies', 'U') IS NOT NULL
+			IF OBJECT_ID('dbo.Charts', 'U') IS NOT NULL
 			BEGIN
-				IF EXISTS (SELECT 1 FROM dbo.Hierarchies WHERE DeletedAt IS NULL)
+				IF EXISTS (SELECT 1 FROM dbo.Charts)
 				BEGIN
-					SET @hasHierarchies = 1;
+					SET @hasCharts = 1;
 				END
 			END
 
 			SELECT
 				@hasBootstrap AS HasBootstrap,
-				@hasHierarchyAccess AS HasHierarchyAccess,
-				@hasHierarchies AS HasHierarchies,
-				@hasHierarchyUsers AS HasHierarchyUsers;
+				@hasChartAccess AS HasChartAccess,
+				@hasCharts AS HasCharts,
+				@hasChartUsers AS HasChartUsers;
 		`
 		);
 
 	const row = result.recordset?.[0];
-	const hasHierarchies = Boolean(row?.HasHierarchies);
-	const hasHierarchyAccess = Boolean(row?.HasHierarchyAccess);
+	const hasCharts = Boolean(row?.HasCharts);
+	const hasChartAccess = Boolean(row?.HasChartAccess);
 	const isBootstrap = Boolean(row?.HasBootstrap);
-	const hasHierarchyUsers = Boolean(row?.HasHierarchyUsers);
-	const hasAccess = isBootstrap || hasHierarchyAccess;
-	return { hasHierarchies, hasHierarchyUsers, hasHierarchyAccess, isBootstrap, hasAccess };
+	const hasChartUsers = Boolean(row?.HasChartUsers);
+	const hasAccess = isBootstrap || hasChartAccess;
+	return { hasCharts, hasChartUsers, hasChartAccess, isBootstrap, hasAccess };
 }

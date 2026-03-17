@@ -1,0 +1,6 @@
+Node Connections
+Nodes have four connection points denoted by the dots on each edge that can be used to make connections.
+
+Click and drag from a connection point on one node to any connection point on another node to connect them.
+
+Any connection can be left clicked to show an X button that will remove the connection.

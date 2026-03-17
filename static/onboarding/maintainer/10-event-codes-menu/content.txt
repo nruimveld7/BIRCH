@@ -1,4 +1,0 @@
-Event Codes Menu
-Use the Event Codes menu to view and manage event code definitions.
-
-Event codes standardize how events are labeled and shown across the schedule.

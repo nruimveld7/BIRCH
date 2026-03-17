@@ -86,9 +86,9 @@
 		}
 		lastOpen = open;
 	}
-	$: scheduleLabelFitCheck(selectedLabelShort, selectedLabelLong);
+	$: chartLabelFitCheck(selectedLabelShort, selectedLabelLong);
 
-	function scheduleLabelFitCheck(shortLabel: string, longLabel: string) {
+	function chartLabelFitCheck(shortLabel: string, longLabel: string) {
 		if (typeof window === 'undefined') {
 			showLongLabel = false;
 			return;
@@ -484,7 +484,7 @@
 		}
 		document.addEventListener('mousedown', handleDocMouseDown);
 		document.addEventListener('keydown', handleKeydown);
-		scheduleLabelFitCheck(selectedLabelShort, selectedLabelLong);
+		chartLabelFitCheck(selectedLabelShort, selectedLabelLong);
 		return () => {
 			if (labelResizeObserver) {
 				labelResizeObserver.disconnect();

@@ -11,7 +11,7 @@ This spec defines Team Setup > Shifts behavior for:
 - Shift ordering by month
 - Shift removal
 
-This spec is schedule-scoped.
+This spec is chart-scoped.
 
 ## Definitions
 - **Main shift entry**: canonical row representing a shift identity.
@@ -19,12 +19,12 @@ This spec is schedule-scoped.
 - **Active for month**: a shift is active for a month if the month range overlaps `[StartDate, EndDate]`, where `EndDate = NULL` means open-ended.
 - **Single-day interval**: `StartDate == EndDate`, explicitly valid.
 - **Soft-deleted shift**: historical shift row not active for current use; must have non-NULL end date.
-- **HasEverBeenInUse**: true when the shift has had assigned employees at any point such that it would have appeared on schedule with assignment coverage.
+- **HasEverBeenInUse**: true when the shift has had assigned employees at any point such that it would have appeared on chart with assignment coverage.
 
 ## Naming and Uniqueness
 - Only display-name uniqueness matters.
 - Matching is exact string match (case-sensitive).
-- Within a schedule scope, two shifts with the same name must not both be active for overlapping time.
+- Within a chart scope, two shifts with the same name must not both be active for overlapping time.
 - Historical duplicate identities for the same name are not allowed; creation must reinstate existing soft-deleted identity when applicable.
 
 ## Create Shift
@@ -156,8 +156,8 @@ Hard-delete scope for main shift remove:
 - Date overlap and uniqueness checks must be performed server-side to prevent race-condition duplicates.
 
 ## Suggested Storage for Monthly Order
-Use a new schedule-scoped monthly order table (or equivalent) that stores order snapshots only for changed months.
-- Key concept: one snapshot per changed month per schedule.
+Use a new chart-scoped monthly order table (or equivalent) that stores order snapshots only for changed months.
+- Key concept: one snapshot per changed month per chart.
 - Snapshot payload may be normalized rows or ordered ID list, as long as deterministic reconstruction is supported.
 
 ## Open Implementation Notes

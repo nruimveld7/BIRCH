@@ -1,0 +1,6 @@
+Charts Popup Overview
+The charts popup is only accessible when more than one chart is available to your account.
+
+This popup is used to switch between available charts and set the default chart.
+
+To access this popup (if available) simply click on the chart name in the top left corner.

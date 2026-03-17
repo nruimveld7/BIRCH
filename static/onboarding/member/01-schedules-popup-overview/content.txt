@@ -1,6 +1,0 @@
-Schedules Popup Overview
-The schedules popup is only accessible when more than one schedule is available to your account.
-
-This popup is used to switch between available schedules and set the default schedule.
-
-To access this popup (if available) simply click on the schedule name in the top left corner.

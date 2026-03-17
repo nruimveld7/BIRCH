@@ -1,0 +1,8 @@
+Changing Theme
+Use the theme control in the top bar to change how the chart is displayed.
+
+You can cycle through system, dark, and light theme preferences.
+
+Pick the mode that gives you the best readability for daily use.
+
+If there are visibility issues in your preferred mode, discuss this with a chart manager.

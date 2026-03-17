@@ -1,0 +1,9 @@
+Chart Popup Overview
+This popup is your manager control center for chart-level settings.
+
+From here, you can:
+- Rename the chart
+- Deactivate a chart
+- Adjust page and canvas theme colors
+
+Open it by clicking the chart name in the top-left area of the page.

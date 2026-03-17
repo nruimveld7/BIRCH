@@ -27,11 +27,11 @@ export const handle: Handle = async ({ event, resolve }) => {
         throw redirect(302, '/auth/login');
     }
 
-    const access = await getAccessState(session.user.id);
-    if (!isDevApiPath) {
-        if (access.isBootstrap && !access.hasHierarchyAccess && pathname !== SETUP_PATH) {
-            throw redirect(302, SETUP_PATH);
-        }
+	const access = await getAccessState(session.user.id);
+	if (!isDevApiPath) {
+		if (access.isBootstrap && !access.hasCharts && pathname !== SETUP_PATH) {
+			throw redirect(302, SETUP_PATH);
+		}
         if (!access.hasAccess && pathname !== UNAUTHORIZED_PATH) {
             throw redirect(302, UNAUTHORIZED_PATH);
         }

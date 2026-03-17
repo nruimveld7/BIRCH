@@ -2,11 +2,11 @@ import type { Dirent } from 'node:fs';
 import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
-export type HierarchyRole = 'Member' | 'Maintainer' | 'Manager';
+export type ChartRole = 'Member' | 'Maintainer' | 'Manager';
 
 export type OnboardingSlide = {
 	id: string;
-	role: HierarchyRole;
+	role: ChartRole;
 	roleTier: number;
 	title: string;
 	description: string;
@@ -15,13 +15,13 @@ export type OnboardingSlide = {
 
 const ONBOARDING_ROOT_DIR = join(process.cwd(), 'static', 'onboarding');
 
-const roleTierByName: Record<HierarchyRole, number> = {
+const roleTierByName: Record<ChartRole, number> = {
 	Member: 1,
 	Maintainer: 2,
 	Manager: 3
 };
 
-const roleFolderByName: Record<HierarchyRole, string> = {
+const roleFolderByName: Record<ChartRole, string> = {
 	Member: 'member',
 	Maintainer: 'maintainer',
 	Manager: 'manager'
@@ -29,7 +29,7 @@ const roleFolderByName: Record<HierarchyRole, string> = {
 
 const imageExtensions = ['.png', '.jpg', '.jpeg', '.webp', '.gif', '.avif', '.svg'] as const;
 
-export function getRoleTier(role: HierarchyRole | null | undefined): number {
+export function getRoleTier(role: ChartRole | null | undefined): number {
 	if (!role) return 0;
 	return roleTierByName[role] ?? 0;
 }
@@ -75,7 +75,7 @@ async function parseSlideContent(
 	}
 }
 
-async function loadRoleSlides(role: HierarchyRole): Promise<OnboardingSlide[]> {
+async function loadRoleSlides(role: ChartRole): Promise<OnboardingSlide[]> {
 	const roleFolder = roleFolderByName[role];
 	const roleTier = roleTierByName[role];
 	const roleDir = join(ONBOARDING_ROOT_DIR, roleFolder);
@@ -118,7 +118,7 @@ export async function loadOnboardingSlidesByTierRange(params: {
 		return [];
 	}
 
-	const orderedRoles: HierarchyRole[] = ['Member', 'Maintainer', 'Manager'];
+	const orderedRoles: ChartRole[] = ['Member', 'Maintainer', 'Manager'];
 	const roles = orderedRoles.filter((role) => {
 		const tier = roleTierByName[role];
 		return tier > minimum && tier <= maximum;

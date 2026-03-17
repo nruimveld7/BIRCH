@@ -1,0 +1,10 @@
+Chart Editing
+As a maintainer of a chart, you gain access to edit the chart.
+
+Use the View/Edit toggle to switch between the two modes.
+
+In Edit Mode, use "+ New Node" to create a new node.
+
+Nodes are able to be dragged around and renamed.
+
+Right clicking on a node adds the ability to pin the node, add employees to the node, or delete the node.

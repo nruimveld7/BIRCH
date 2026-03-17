@@ -25,7 +25,7 @@ export async function dispatchDueScheduledReminders(): Promise<ScheduledReminder
 	if (heartbeatRecipient) {
 		try {
 			const result = await sendPlaceholderAlertNotification({
-				hierarchyName: 'Placeholder Hierarchy',
+				chartName: 'Placeholder Chart',
 				intendedRecipients: [heartbeatRecipient],
 				targetMemberName: 'BIRCH User',
 				triggeringUserName: 'BIRCH Reminder Worker',
