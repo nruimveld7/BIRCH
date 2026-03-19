@@ -6,17 +6,11 @@ import { getAccessState } from '$lib/server/access';
 const PUBLIC_PATHS = ['/auth/login', '/auth/callback', '/auth/error', '/favicon.ico'];
 const UNAUTHORIZED_PATH = '/unauthorized';
 const SETUP_PATH = '/setup';
-const INTERNAL_JOB_PATH_PREFIX = '/api/internal/jobs/';
 const DEV_API_PATH_PREFIX = '/api/dev/';
 
 export const handle: Handle = async ({ event, resolve }) => {
     const { pathname } = event.url;
     const isDevApiPath = pathname.startsWith(DEV_API_PATH_PREFIX);
-
-    if (pathname.startsWith(INTERNAL_JOB_PATH_PREFIX)) {
-        // Internal jobs are blocked at nginx and only reachable on the internal docker network.
-        return resolve(event);
-    }
 
     if (PUBLIC_PATHS.some((p) => pathname.startsWith(p))) {
         return resolve(event);

@@ -145,9 +145,6 @@ Onboarding:
 - `GET /api/onboarding/slides`
 - `PATCH /api/onboarding/role`
 
-Internal jobs:
-- `POST /api/internal/jobs/scheduled-reminders`
-
 ## First-Time Setup
 Implementation:
 - `src/routes/setup/+page.svelte`

@@ -51,9 +51,3 @@ docker/certs/**/*
 *.log
 yarn-error.log*
 npm-debug.log*
-
-# Temporary local-only mail relay test files (contains hardcoded infra/recipients)
-src/lib/server/mail/notifications.ts
-src/lib/server/mail/templates.ts
-src/routes/mail/+page.server.ts
-src/routes/mail/+page.svelte

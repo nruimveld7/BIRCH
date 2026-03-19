@@ -70,9 +70,6 @@ Onboarding:
 - `GET /api/onboarding/slides`
 - `PATCH /api/onboarding/role`
 
-Internal jobs:
-- `POST /api/internal/jobs/scheduled-reminders`
-
 ## Project Structure
 
 - `src/routes/`: pages and API routes
